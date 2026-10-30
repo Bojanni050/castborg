@@ -67,3 +67,9 @@ deze aanpak), Actions (wat is gewijzigd).
 - Gevolgen om te weten: budgettests in `stream.test.ts` gebruiken nu `maxOutputTokens: 4` en een budget van 0,02,
   omdat de reservering strenger is dan de oude meting. Een budget onder de worst case van één beurt blokkeert nu
   elke beurt — dat is de prijs van een harde grens en staat in de README.
+
+## 2026-10-30 (Root-scripts via corepack)
+
+- Findings: `corepack enable` faalt met EPERM op `C:\Program Files\nodejs` (geen schrijfrechten, en corepack probeert ook yarn neer te zetten). Daardoor werkten `pnpm test`, `pnpm typecheck` en `pnpm db:migrate` niet op deze machine, want die roepen intern `pnpm` aan.
+- Conclusions: geen PATH-gepriegel in de repo stoppen. De root-scripts roepen nu expliciet `corepack pnpm` aan, wat ook werkt als pnpm later wél op PATH staat. Eén woord per script, en het werkt op elke machine zonder setup.
+- Actions: `package.json` — `db:migrate`, `test` en `typecheck` gebruiken `corepack pnpm`; `corepack pnpm typecheck` draait groen op beide packages.
