@@ -38,6 +38,12 @@ export interface AppDeps {
   pricing: Pricing;
   /** Bovengrens per antwoord; dezelfde waarde als de provider gebruikt, anders rekent het budget scheef. */
   maxOutputTokens: number;
+  /**
+   * TIJDELIJK: als dit gezet is, komt het model uit de omgeving (MISTRAL_MODEL) en niet uit de
+   * site-instellingen. Bestaat omdat de prijs in de omgeving ook globaal is: één model, één prijs.
+   * Zodra de UI modellen laat kiezen hoort de prijs per model in de database en verdwijnt dit veld.
+   */
+  modelOverride?: string;
   limiters?: {
     config?: RateLimiter;
     conversationStart?: RateLimiter;
@@ -141,7 +147,7 @@ const SETTINGS_COLUMNS = {
 } as const;
 
 export function createApp(deps: AppDeps): Hono {
-  const { db, sessionSecret, adminTokens, provider, pricing, maxOutputTokens } = deps;
+  const { db, sessionSecret, adminTokens, provider, pricing, maxOutputTokens, modelOverride } = deps;
   const limits = {
     config: deps.limiters?.config ?? new RateLimiter(120, 60_000),
     conversationStart: deps.limiters?.conversationStart ?? new RateLimiter(20, 60_000),
@@ -229,7 +235,7 @@ export function createApp(deps: AppDeps): Hono {
       return {
         kind: "ok",
         systemPrompt,
-        model: settings.model,
+        model: modelOverride ?? settings.model,
         history: [...existing, { role: "user" as const, content: text }],
         reservationId,
       };
@@ -306,6 +312,17 @@ export function createApp(deps: AppDeps): Hono {
     return found;
   }
 
+  /** Model tijdelijk uit de omgeving: één bron, geen instelling die niets doet. */
+  const modelLocked = (c: Context) =>
+    c.json(
+      {
+        error: "model_locked",
+        model: modelOverride,
+        message: "Het model komt nu uit MISTRAL_MODEL in .env; haal die variabele weg om het per site te zetten.",
+      },
+      409,
+    );
+
   const app = new Hono();
 
   // CORS voor widgetroutes. Er worden geen cookies gebruikt; autorisatie loopt via sleutel of bearer-token.
@@ -326,6 +343,7 @@ export function createApp(deps: AppDeps): Hono {
     if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
 
     const input = parsed.data;
+    if (input.model !== undefined && modelOverride) return modelLocked(c);
     const domains = [...new Set(input.domains.map(normalizeDomain))].filter(Boolean);
     if (domains.length === 0) return c.json({ error: "invalid_input" }, 400);
     if (input.timezone && !(await isKnownTimezone(db, input.timezone))) return c.json({ error: "invalid_timezone" }, 400);
@@ -368,6 +386,7 @@ export function createApp(deps: AppDeps): Hono {
 
     const parsed = updateSiteSettingsInput.safeParse(await readJson(c));
     if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+    if (parsed.data.model !== undefined && modelOverride) return modelLocked(c);
 
     return respondToUpdate(c, await applySiteUpdate(db, c.req.param("id"), parsed.data, actor));
   });
@@ -415,7 +434,13 @@ export function createApp(deps: AppDeps): Hono {
 
     // Terugdraaien is een gewone PATCH: er komt een nieuwe historieregel bij in plaats van dat de
     // oude wordt herschreven. Zo blijft de geschiedenis zelf ook geschiedenis.
-    const parsed = updateSiteSettingsInput.safeParse(snapshotToInput(snapshot));
+    const restored = snapshotToInput(snapshot);
+    // Staat het model tijdelijk vast via MISTRAL_MODEL, dan raakt een terugdraaiing het model niet aan;
+    // anders zou je een oude prompt niet kunnen terugzetten zonder het model te overschrijven.
+    if (modelOverride) delete restored.model;
+    if (Object.keys(restored).length === 0) return modelLocked(c);
+
+    const parsed = updateSiteSettingsInput.safeParse(restored);
     if (!parsed.success) return c.json({ error: "invalid_history" }, 500);
 
     return respondToUpdate(c, await applySiteUpdate(db, siteId, parsed.data, actor));

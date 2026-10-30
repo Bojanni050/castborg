@@ -1,6 +1,7 @@
 import { serve } from "@hono/node-server";
 import { createApp, type AdminToken, type Pricing } from "./app.js";
 import { createPool } from "./db/tenant.js";
+import { logEvent } from "./log.js";
 import { MistralProvider } from "./mistral.js";
 import { StubProvider, type AiProvider } from "./provider.js";
 
@@ -46,6 +47,13 @@ if (sessionSecret.length < 32) fail("SESSION_SECRET moet minimaal 32 tekens zijn
 const maxOutputTokens = process.env.MAX_OUTPUT_TOKENS ? Number(process.env.MAX_OUTPUT_TOKENS) : 800;
 if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) fail("MAX_OUTPUT_TOKENS moet een positief geheel getal zijn");
 
+/**
+ * Tijdelijk: het model uit de omgeving overschrijft de site-instellingen. Bewust, zolang de prijs ook
+ * globaal in de omgeving staat (één model, één prijs). Verdwijnt zodra de UI modellen laat kiezen en
+ * de prijs per model in de database staat.
+ */
+const modelOverride = process.env.MISTRAL_MODEL?.trim() || undefined;
+
 const providerName = process.env.PROVIDER ?? "mistral";
 let provider: AiProvider;
 let pricing: Pricing;
@@ -78,9 +86,16 @@ const app = createApp({
   provider,
   pricing,
   maxOutputTokens,
+  modelOverride,
 });
 
 const port = Number(process.env.PORT ?? 8787);
 serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
   console.log(`API luistert op http://127.0.0.1:${port} (provider: ${provider.name})`);
+  if (modelOverride) {
+    logEvent("warn", "model_override_active", {
+      model: modelOverride,
+      note: "MISTRAL_MODEL overschrijft de site-instellingen; PATCH met een model geeft 409.",
+    });
+  }
 });

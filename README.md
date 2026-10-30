@@ -61,6 +61,10 @@ inputvalidatie met Zod, AI-aanroep buiten de databasetransactie, en de Origin-co
 - Streaming volgens het gedocumenteerde SSE-formaat (`data: {…}` … `data: [DONE]`); token-usage wordt uit het laatste event gelezen.
   Ontbreekt die, dan wordt het verbruik geschat (±4 tekens per token) en in `usage_events.estimated` gemarkeerd.
 - Standaardmodel per site: `mistral-small-latest` (kolom `site_settings.model`, per site aanpasbaar). Controleer in je Mistral-account of de alias nog naar het model wijst dat je wilt.
+- **Tijdelijk:** staat `MISTRAL_MODEL` in `.env`, dan wint die van `site_settings.model` voor alle sites en weigert de
+  admin-route een model te zetten (`409 model_locked`). Puur om snel te kunnen wisselen zolang de UI nog geen modellen
+  laat kiezen; het gaat eruit zodra prijzen per model in de database staan. Onthoud dat de prijzen in `.env` één paar
+  zijn voor álle sites: een duurder model met dezelfde prijs betekent dat het dagbudget te ruim staat.
 - **Prijzen staan niet in de code.** Zet `PRICE_INPUT_EUR_PER_M_TOKENS` en `PRICE_OUTPUT_EUR_PER_M_TOKENS` zelf in `.env`; de server start niet zonder.
   Zonder prijzen zou het dagbudget niets afdwingen. Mistral heeft **geen prijs-API** (de Admin API met `/v1/admin/usage` is
   Enterprise-only en geeft achteraf je verbruik); neem de actuele bedragen van de prijspagina en noteer datum en model erbij.

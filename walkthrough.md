@@ -105,3 +105,24 @@ deze aanpak), Actions (wat is gewijzigd).
 - Validatie: `typecheck` schoon, widgettests 20/20, API-tests 69/69, build 27,36 kB (10,87 kB gzip).
   In de browser gecontroleerd: launcher, paneel, begroeting, AI-melding, versturen, delta-voor-delta
   renderen, historie na herladen. De stub antwoordt met `(stub) Je schreef: …`.
+
+## 2026-10-30 (Model tijdelijk uit de omgeving)
+
+- Findings: het model stond per site (`site_settings.model`) maar de prijs stond globaal in `.env`, met één paar
+  bedragen voor alle sites. Zodra twee sites een verschillend model hebben, rekent de tweede met de prijs van de eerste:
+  medium op small-tarief is ongeveer tien keer te laag, dus het dagbudget gaat nooit af. Bo wilde het model voor nu
+  gewoon ergens kunnen invullen; de UI gaat later modellen kiezen en de prijs automatisch bijwerken.
+- Conclusions: daarom een expliciete, tijdelijke knop `MISTRAL_MODEL` in `.env` die van de site-instelling wint, in
+  plaats van een stille override. De admin-route weigert dan een model te zetten (409 `model_locked`) in plaats van het
+  te accepteren en te negeren — een instelling die niets doet is erger dan een instelling die weigert. Terugzetten van
+  een oude prompt blijft werken: bij restore wordt het model uit de snapshot gehaald en blijft de rest intact.
+- Conclusions: de echte vorm is optie B (prijs per model in de database, `DEFAULT_MODEL` in env voor nieuwe sites, en dan
+  deze override verwijderen). Dat is bewust niet nu gedaan; de UI vraagt erom.
+- Actions:
+  - `packages/api/src/app.ts`: `AppDeps.modelOverride`, `modelOverride ?? settings.model` in `beginTurn`, `modelLocked()`
+    op `POST`/`PATCH` en in de restore-haak.
+  - `packages/api/src/server.ts`: `MISTRAL_MODEL` inlezen, doorgeven, en bij het starten `model_override_active` loggen.
+  - `packages/api/test/settings.test.ts`: `lastModel` op de `RecordingProvider` + 3 tests (override wint, PATCH met model
+    geeft 409, restore raakt het model niet aan).
+  - `.env.example`, `README.md`, `walkthrough.md`.
+- Validatie: `typecheck` schoon, 72/72 tests groen (was 69).

@@ -12,11 +12,13 @@ let db: Db;
 /** Onthoudt de systeemprompt van de laatste beurt en kan de provider kunstmatig laten wachten. */
 class RecordingProvider extends StubProvider {
   lastPrompt = "";
+  lastModel = "";
   delayMs = 0;
   replyTokens = 0;
 
   override async complete(req: ProviderRequest): Promise<ProviderResponse> {
     this.lastPrompt = req.systemPrompt;
+    this.lastModel = req.model;
     if (this.delayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
     const res = await super.complete(req);
     if (this.replyTokens === 0) return res;
@@ -31,6 +33,7 @@ const provider = new RecordingProvider();
 interface AppOptions {
   pricing?: { inputEurPerMTok: number; outputEurPerMTok: number };
   maxOutputTokens?: number;
+  modelOverride?: string;
   limiters?: Parameters<typeof createApp>[0]["limiters"];
 }
 
@@ -42,6 +45,7 @@ function makeApp(opts: AppOptions = {}) {
     provider,
     pricing: opts.pricing ?? { inputEurPerMTok: 0, outputEurPerMTok: 0 },
     maxOutputTokens: opts.maxOutputTokens ?? 800,
+    ...(opts.modelOverride === undefined ? {} : { modelOverride: opts.modelOverride }),
     limiters: { ipMessage: new RateLimiter(10_000, 60_000), message: new RateLimiter(10_000, 60_000), ...opts.limiters },
   });
 }
@@ -361,5 +365,53 @@ describe("dagbudget als harde grens", () => {
       .rows[0];
     expect(Number(usage.cost_eur)).toBeCloseTo(0.03, 6);
     expect(usage.request_id).toMatch(/^[0-9a-f-]{36}$/);
+  });
+});
+
+describe("model uit de omgeving", () => {
+  const OVERRIDE = "mistral-gepind-1";
+
+  it("gaat voor de site-instelling", async () => {
+    const app = makeApp({ modelOverride: OVERRIDE });
+    const site = await createSite(app, "Modeloverride");
+    const conv = await startConversation(app, site.publicKey);
+
+    expect((await sendMessage(app, conv.conversationId, conv.token)).status).toBe(200);
+    expect(provider.lastModel).toBe(OVERRIDE);
+  });
+
+  it("weigert een PATCH met model zolang de omgeving het model bepaalt", async () => {
+    const app = makeApp({ modelOverride: OVERRIDE });
+    const site = await createSite(app, "Modellocked");
+
+    const res = await req(app, `/api/v1/admin/sites/${site.id}`, {
+      method: "PATCH",
+      body: { model: "mistral-small-latest" },
+    });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: "model_locked", model: OVERRIDE });
+
+    // Een PATCH zonder model blijft gewoon werken.
+    expect((await req(app, `/api/v1/admin/sites/${site.id}`, { method: "PATCH", body: { greeting: "Hoi" } })).status).toBe(200);
+  });
+
+  it("laat het model met rust bij het terugdraaien van een oude prompt", async () => {
+    const app = makeApp({ modelOverride: OVERRIDE });
+    const site = await createSite(app, "Modelrestore");
+
+    await req(app, `/api/v1/admin/sites/${site.id}`, { method: "PATCH", body: { greeting: "Eerste" } });
+    await req(app, `/api/v1/admin/sites/${site.id}`, { method: "PATCH", body: { greeting: "Tweede" } });
+
+    const history = (await (await req(app, `/api/v1/admin/sites/${site.id}/history?limit=10`)).json()) as {
+      history: { id: string; after: { greeting?: string } }[];
+    };
+    const target = history.history.find((h) => h.after.greeting === "Eerste");
+    expect(target).toBeDefined();
+
+    const res = await req(app, `/api/v1/admin/sites/${site.id}/history/${target!.id}/restore`, { method: "POST" });
+    expect(res.status).toBe(200);
+    const state = (await res.json()) as { settings: { greeting: string; model: string } };
+    expect(state.settings.greeting).toBe("Eerste");
+    expect(state.settings.model).toBe("mistral-small-latest");
   });
 });
