@@ -5,8 +5,10 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
+  conversationsQuery,
   createSiteInput,
   dashboardLoginInput,
+  deletionsQuery,
   leadsQuery,
   sendMessageInput,
   siteSettingsHistoryQuery,
@@ -29,6 +31,7 @@ import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
 import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
 import { RateLimiter } from "./ratelimit.js";
+import { deleteConversation, deleteLead, runRetention } from "./retention.js";
 import { issueSessionToken, verifySessionToken, type SessionClaims } from "./token.js";
 
 export interface Pricing {
@@ -167,6 +170,27 @@ interface LeadRow {
   created_at: Date;
 }
 
+interface ConversationRow {
+  id: string;
+  created_at: Date;
+  updated_at: Date;
+  message_count: number;
+  lead_count: number;
+  preview: string | null;
+}
+
+interface DeletionRow {
+  id: string;
+  ran_at: Date;
+  source: string;
+  subject: string;
+  conversations: number;
+  messages: number;
+  leads: number;
+  actor_type: string;
+  actor_id: string;
+}
+
 interface TurnSettings {
   system_prompt: string;
   model: string;
@@ -202,6 +226,8 @@ const SETTINGS_COLUMNS = {
   dailyBudgetEur: "daily_budget_eur",
   maxMessagesPerConversation: "max_messages_per_conversation",
   timezone: "timezone",
+  conversationRetentionDays: "conversation_retention_days",
+  leadRetentionDays: "lead_retention_days",
 } as const;
 
 export function createApp(deps: AppDeps): Hono {
@@ -573,6 +599,126 @@ export function createApp(deps: AppDeps): Hono {
     });
     if (!leads) return c.json({ error: "not_found" }, 404);
     return c.json({ leads });
+  });
+
+  /**
+   * Gesprekken van een site, alleen om te kunnen opruimen. Met een stukje van het eerste
+   * bezoekersbericht: een lijst met tijdstippen alleen is niet te beoordelen, en dan delete je
+   * of niets of alles.
+   */
+  app.get("/api/v1/admin/sites/:id/conversations", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const parsed = conversationsQuery.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const conversations = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return null;
+      const rows = (
+        await q.query<ConversationRow>(
+          `SELECT c.id, c.created_at, c.updated_at,
+                  (SELECT count(*)::int FROM messages m WHERE m.conversation_id = c.id) AS message_count,
+                  (SELECT count(*)::int FROM leads l WHERE l.conversation_id = c.id) AS lead_count,
+                  (SELECT left(m.content, 120) FROM messages m
+                    WHERE m.conversation_id = c.id AND m.role = 'user'
+                    ORDER BY m.created_at LIMIT 1) AS preview
+             FROM conversations c
+            ORDER BY c.updated_at DESC, c.id DESC
+            LIMIT $1`,
+          [parsed.data.limit],
+        )
+      ).rows;
+      return rows.map((row) => ({
+        id: row.id,
+        createdAt: row.created_at.toISOString(),
+        updatedAt: row.updated_at.toISOString(),
+        messageCount: row.message_count,
+        leadCount: row.lead_count,
+        preview: row.preview,
+      }));
+    });
+    if (!conversations) return c.json({ error: "not_found" }, 404);
+    return c.json({ conversations });
+  });
+
+  /**
+   * Verwijdert één gesprek. Berichten gaan mee, een lead blijft en raakt zijn gesprek kwijt, de
+   * kostenadministratie blijft staan met een lege conversation_id.
+   */
+  app.delete("/api/v1/admin/sites/:id/conversations/:conversationId", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const conversationId = c.req.param("conversationId");
+    if (!isUuid(siteId) || !isUuid(conversationId)) return c.json({ error: "not_found" }, 404);
+
+    const deleted = await deleteConversation(db, siteId, conversationId, actor);
+    if (!deleted) return c.json({ error: "not_found" }, 404);
+    return c.json({ deleted });
+  });
+
+  app.delete("/api/v1/admin/sites/:id/leads/:leadId", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const leadId = c.req.param("leadId");
+    if (!isUuid(siteId) || !isUuid(leadId)) return c.json({ error: "not_found" }, 404);
+
+    const deleted = await deleteLead(db, siteId, leadId, actor);
+    if (!deleted) return c.json({ error: "not_found" }, 404);
+    return c.json({ deleted: { conversations: 0, messages: 0, leads: 1 } });
+  });
+
+  /** Nu opruimen volgens de termijnen van deze site. De cron gebruikt hetzelfde pad. */
+  app.post("/api/v1/admin/sites/:id/retention/run", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+    if (!(await readSiteState(db, siteId))) return c.json({ error: "not_found" }, 404);
+
+    return c.json({ deleted: await runRetention(db, siteId, actor) });
+  });
+
+  /** Wat er is weggegooid: aantallen, geen inhoud. */
+  app.get("/api/v1/admin/sites/:id/deletions", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const parsed = deletionsQuery.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const deletions = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return null;
+      const rows = (
+        await q.query<DeletionRow>(
+          `SELECT id, ran_at, source, subject, conversations, messages, leads, actor_type, actor_id
+             FROM deletion_log ORDER BY ran_at DESC, id DESC LIMIT $1`,
+          [parsed.data.limit],
+        )
+      ).rows;
+      return rows.map((row) => ({
+        id: row.id,
+        ranAt: row.ran_at.toISOString(),
+        source: row.source,
+        subject: row.subject,
+        conversations: row.conversations,
+        messages: row.messages,
+        leads: row.leads,
+        actorType: row.actor_type,
+        actorId: row.actor_id,
+      }));
+    });
+    if (!deletions) return c.json({ error: "not_found" }, 404);
+    return c.json({ deletions });
   });
 
   app.get("/api/v1/admin/sites/:id/history", async (c) => {
@@ -1007,6 +1153,8 @@ interface SiteState {
     dailyBudgetEur: number;
     maxMessagesPerConversation: number;
     timezone: string;
+    conversationRetentionDays: number;
+    leadRetentionDays: number;
     updatedAt: string;
   };
 }
@@ -1027,10 +1175,13 @@ async function readSiteStateWith(q: PoolClient, siteId: string): Promise<SiteSta
       daily_budget_eur: string;
       max_messages_per_conversation: number;
       timezone: string;
+      conversation_retention_days: number;
+      lead_retention_days: number;
       updated_at: Date;
     }>(
       `SELECT system_prompt, greeting, opening_question, widget_position, primary_color, model, provider,
-              daily_budget_eur, max_messages_per_conversation, timezone, updated_at
+              daily_budget_eur, max_messages_per_conversation, timezone, conversation_retention_days,
+              lead_retention_days, updated_at
          FROM site_settings WHERE site_id = $1`,
       [siteId],
     )
@@ -1053,6 +1204,8 @@ async function readSiteStateWith(q: PoolClient, siteId: string): Promise<SiteSta
       dailyBudgetEur: Number(s.daily_budget_eur),
       maxMessagesPerConversation: s.max_messages_per_conversation,
       timezone: s.timezone,
+      conversationRetentionDays: s.conversation_retention_days,
+      leadRetentionDays: s.lead_retention_days,
       updatedAt: s.updated_at.toISOString(),
     },
   };

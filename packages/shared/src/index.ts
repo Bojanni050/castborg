@@ -33,6 +33,8 @@ const modelSchema = z.string().min(1).max(120);
 const dailyBudgetSchema = z.number().min(0).max(10000);
 const maxMessagesSchema = z.number().int().min(2).max(200);
 const timezoneSchema = z.string().min(1).max(64);
+/** 0 = nooit automatisch opruimen; 10 jaar is de bovengrens, verder is het geen termijn meer. */
+const retentionDaysSchema = z.number().int().min(0).max(3650);
 
 export const createSiteInput = z.object({
   name: z.string().min(1).max(120),
@@ -46,6 +48,8 @@ export const createSiteInput = z.object({
   dailyBudgetEur: dailyBudgetSchema.optional(),
   maxMessagesPerConversation: maxMessagesSchema.optional(),
   timezone: timezoneSchema.optional(),
+  conversationRetentionDays: retentionDaysSchema.optional(),
+  leadRetentionDays: retentionDaysSchema.optional(),
 });
 export type CreateSiteInput = z.infer<typeof createSiteInput>;
 
@@ -67,6 +71,8 @@ export const updateSiteSettingsInput = z
     dailyBudgetEur: dailyBudgetSchema,
     maxMessagesPerConversation: maxMessagesSchema,
     timezone: timezoneSchema,
+    conversationRetentionDays: retentionDaysSchema,
+    leadRetentionDays: retentionDaysSchema,
   })
   .partial()
   .strict()
@@ -104,6 +110,14 @@ export const submitLeadInput = leadInput
 export type SubmitLeadInput = z.infer<typeof submitLeadInput>;
 
 export const leadsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const conversationsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
+export const deletionsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 

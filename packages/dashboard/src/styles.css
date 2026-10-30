@@ -283,6 +283,33 @@ button.ghost:hover:not(:disabled) {
   border-color: var(--line);
 }
 
+/* Verwijderen: rood, maar niet schreeuwerig — het is de tweede klik, de eerste was "Verwijderen". */
+button.danger {
+  background: #b91c1c;
+  border-color: #b91c1c;
+  color: #fff;
+  padding: 6px 10px;
+}
+
+button.danger:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.hint.warn {
+  color: #9a3412;
+}
+
+.hint code {
+  font-size: 12px;
+  background: var(--surface-2);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
 .actions {
   display: flex;
   gap: 10px;

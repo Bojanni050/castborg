@@ -265,3 +265,46 @@ deze aanpak), Actions (wat is gewijzigd).
   browser: ingelogd, site aangemaakt, prompt geplakt en opgeslagen, historie toonde `user · bojan` met leesbare diff.
   Daarna één echte Mistral-beurt met de via het scherm gezette prompt: het antwoord gebruikte de tekst uit die prompt,
   dus de keten scherm → database → provider is rond.
+
+## 2026-10-30 (Verwijderpad en bewaartermijnen)
+
+- Findings: er was geen enkele manier om een gesprek of lead weg te gooien. Dat maakt elke bewaartermijn in een
+  verwerkingsovereenkomst een belofte die je technisch niet kunt nakomen. Bo corrigeerde eerder al mijn aanname over
+  Mistral (geen aparte verwerkersovereenkomst nodig, de API-voorwaarden dekken het); wat wél nodig is, is een
+  overeenkomst met elke klant — en dan moet je kunnen verwijderen.
+- Conclusions: het schema bepaalde de semantiek, ik heb die niet opnieuw bedacht. `messages` cascadeert mee met een
+  gesprek, `leads.conversation_id` staat op `ON DELETE SET NULL` en `usage_events.conversation_id` ook. Een gesprek
+  verwijderen wist dus de inhoud, laat de lead bestaan en houdt de kostenadministratie kloppend. Dat is precies de
+  combinatie die je wilt: inhoud weg, verantwoording blijven.
+- Conclusions: twee termijnen in plaats van één, omdat gespreksinhoud en contactgegevens verschillend wegen. 90 dagen
+  inhoud en 365 dagen leads is de startwaarde; 0 betekent nooit automatisch opruimen en dat staat in oranje in de UI,
+  want stilzwijgend alles bewaren is de fout die je niet wilt maken.
+- Conclusions: gesprekken worden op `updated_at` beoordeeld, niet op `created_at`. Een gesprek dat gisteren nog liep
+  mag niet verdwijnen omdat het twee maanden geleden begon.
+- Conclusions: opruimen is `pnpm retention`, geen timer in de API. Een proces dat moet blijven draaien om op te ruimen
+  is een proces dat je niet meer durft te herstarten. Dezelfde code zit achter een knop, zodat je niet hoeft te
+  wachten op de cron om te zien of het werkt.
+- Conclusions: `deletion_log` met aantallen en geen inhoud. Genoeg om een klant te laten zien dat het gebeurt en om
+  zelf terug te vinden wanneer iets is weggegooid, zonder een tweede kopie van de gegevens te bewaren.
+- Conclusions: de veegrun begint bij de cross-tenant sitelijst en gaat daarna per site de tenant-context in. De
+  leesfunctie blijft een leesfunctie; er komt geen verwijderfunctie met `BYPASSRLS` bij.
+- Actions:
+  - `packages/api/migrations/0007_retention.sql`: twee termijnen op `site_settings`, index op
+    `conversations (site_id, updated_at)`, tabel `deletion_log` met RLS.
+  - `packages/api/src/retention.ts` (nieuw): `deleteConversation`, `deleteLead`, `runRetention`.
+  - `packages/api/src/db/retention-run.ts` (nieuw): `sweepAllSites` + CLI, met een try/catch per site zodat één
+    kapotte site de rest niet tegenhoudt.
+  - `packages/api/src/app.ts`: vijf routes (gesprekken lezen, gesprek verwijderen, lead verwijderen, nu opruimen,
+    verwijderlogboek lezen); de termijnen zitten in `SiteState`, `SETTINGS_COLUMNS` en de historie.
+  - `packages/shared/src/index.ts`: `retentionDaysSchema`, `conversationsQuery`, `deletionsQuery`.
+  - `packages/api/package.json` + root `package.json`: script `retention`.
+  - Dashboard: secties Gesprekken en Verwijderd, verwijderknop bij leads, twee-staps bevestiging inline in plaats van
+    een native `confirm` (die kun je niet opmaken en niet uitleggen), en `refreshLists()` dat alleen de lijsten
+    ververst zodat opgeslagen-werk-in-het-formulier niet verdwijnt.
+  - `.env.example` en `README.md`: de termijnen, de routes, `pnpm retention` als cron, en wat verwijderen wel en niet
+    meeneemt.
+- Validatie: `retention.test.ts` 11 tests groen bij de eerste run (2100 ms), volledige suite 110/110 over 8
+  bestanden, typecheck schoon op shared/api/dashboard, dashboardbuild 34,58 kB (11,74 kB gzip). In de browser op de
+  testsite `Opruimtest`: gesprek verwijderen (2 berichten weg, lead blijft, log 1 rij), lead verwijderen, "Nu
+  opruimen" met 0 treffers omdat alles recent is maar met twee nieuwe logregels. Screenshots `retention-1.png`,
+  `retention-2.png`.

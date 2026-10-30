@@ -55,6 +55,11 @@ zet het bij elke run. Zonder `APP_DB_PASSWORD` stopt hij met een melding in plaa
 | `POST /api/v1/conversations/:id/messages/stream` | `Bearer <sessietoken>` | Zelfde, maar als SSE: `delta` `{text}` … daarna `done` `{messageId}` of `error` `{error, requestId}` |
 | `POST /api/v1/conversations/:id/lead` | `Bearer <sessietoken>` | Contactgegevens van de bezoeker; `201` bij nieuw, `200` bij overschrijven, minstens e-mail of telefoon |
 | `GET /api/v1/admin/sites/:id/leads?limit=50` | `Bearer ADMIN_TOKEN` | Ingekomen leads, nieuwste eerst |
+| `DELETE /api/v1/admin/sites/:id/leads/:leadId` | `Bearer ADMIN_TOKEN` | Lead verwijderen (gesprek blijft) |
+| `GET /api/v1/admin/sites/:id/conversations?limit=50` | `Bearer ADMIN_TOKEN` | Gesprekken met aantal berichten, lead en een preview van het eerste bericht |
+| `DELETE /api/v1/admin/sites/:id/conversations/:conversationId` | `Bearer ADMIN_TOKEN` | Gesprek met inhoud verwijderen; een lead blijft bestaan |
+| `POST /api/v1/admin/sites/:id/retention/run` | `Bearer ADMIN_TOKEN` | Nu opruimen volgens de termijnen van die site |
+| `GET /api/v1/admin/sites/:id/deletions?limit=50` | `Bearer ADMIN_TOKEN` | Wat er is verwijderd, wanneer, door wie en hoeveel |
 
 Alle `/admin/…`-routes accepteren naast `Bearer ADMIN_TOKEN` ook de dashboardcookie, zodat het dashboard geen tweede
 soort client is. Wat de historie als actor vastlegt verschilt dan: `admin_token` met de naam van het token, of `user` met
@@ -200,6 +205,29 @@ werkt tegen dezelfde database en cookies.
 - De dashboardcookies zijn van hetzelfde type HMAC als de widget-sessietokens, maar met een eigen `typ`-claim. Een
   widgettoken in de dashboardcookie wordt geweigerd (en andersom).
 
+## Verwijderen en bewaartermijnen
+
+Een bewaartermijn die je niet kunt uitvoeren is een belofte die je niet mag doen. Daarom is verwijderen een
+eerste-klas route, geen handmatige `DELETE` in de database.
+
+- **Twee termijnen per site**: `conversation_retention_days` (inhoud van gesprekken, standaard 90) en
+  `lead_retention_days` (contactgegevens, standaard 365). `0` betekent nooit automatisch opruimen; het dashboard
+  zet dat in oranje, want stilzwijgend alles bewaren is precies wat je niet wilt.
+- **Gesprekken worden op `updated_at` beoordeeld**, dus op het laatste bericht en niet op de start. Een gesprek dat
+  gisteren nog liep verdwijnt niet omdat het twee maanden geleden begon. Leads op `created_at`.
+- **Wat een gesprek verwijderen wel en niet doet**: berichten gaan mee (cascade), de lead blijft bestaan maar raakt
+  losgekoppeld, de kostenadministratie in `usage_events` blijft staan met een lege `conversation_id`, en de
+  reservering verdwijnt. Zo blijft je budgetverantwoording kloppen zonder dat je de inhoud bewaart.
+- **Opruimen is een script, geen timer in de API**: `pnpm retention` (of `POST /admin/sites/:id/retention/run` voor
+  één site). Zet het in cron of een systemd-timer; zie de toelichting in `.env.example`. Een proces dat moet blijven
+  draaien om op te ruimen is een proces dat je niet meer durft te herstarten.
+- **Alles wat verwijderd wordt, staat in `deletion_log`**: wanneer, handmatig of door de termijn, wat, hoeveel en door
+  wie. Geen inhoud, alleen aantallen — genoeg om een klant te laten zien dat het gebeurt, en om zelf terug te vinden
+  wanneer iets is weggegooid.
+- **Verwijderen blijft binnen één tenant.** De cross-tenant sitelijst is een leesfunctie; de veegrun loopt per site
+  daarna in de gewone tenant-context. Een gesprek van een andere site geeft hetzelfde antwoord als een gesprek dat
+  niet bestaat: `404`.
+
 ## Kwaliteitsronde (meten in plaats van voelen)
 
 `packages/api/scripts/kwaliteit.mjs` stuurt een vaste set gesprekken door de echte assistent en schrijft een
@@ -259,14 +287,16 @@ Twee dingen die daaruit te leren zijn en die niet met prompttekst op te lossen z
   promptwijziging ook automatisch kan afketsen.
 - Er is geen veld "wat doet dit bedrijf". Dat zit nu in de systeemprompt zelf; een eigen veld met een korte
   bedrijfsomschrijving hoort bij het instellingenscherm, want anders moet elke klant prompten gaan schrijven.
-- De AI-melding zit in de widget ("je praat met een AI"). Wat nog open is: de verwerkersovereenkomst met
-  Mistral en een bewaartermijn voor gesprekken. Beide horen bij de transparantieplicht en de AVG, niet bij "later".
+- De AI-melding zit in de widget ("je praat met een AI") en de bewaartermijnen zijn uitvoerbaar (zie
+  "Verwijderen en bewaartermijnen"). Wat nog open is: een verwerkingsovereenkomst met elke klant die dit op zijn site
+  zet, met een bijlage die de subverwerkers noemt (Mistral, hosting). Met Mistral zelf is geen aparte overeenkomst
+  nodig: de API-voorwaarden dekken de verwerking.
 - Rate limiter is in geheugen: prima voor één instantie, vervangen zodra je meerdere draait.
 - `knowledge_*` (komt met fase 4).
 - Spamcheck op het leadformulier is een honeypot: een onzichtbaar veld `website` dat een mens leeg laat.
   Is het gevuld, dan antwoordt de API alsof het gelukt is en slaat niets op (`lead_honeypot` in het log).
   Dat is genoeg voor domme formulier-bots; voor gerichte spam is rate limiting het echte antwoord.
-- De melding bij een lead gaat via `LEAD_WEBHOOK_URL` (één JSON-POST, optioneel ondertekend met
-  `LEAD_WEBHOOK_SECRET`). Zonder die variabele wordt een lead alleen opgeslagen en waarschuwt de server
-  bij het starten (`lead_webhook_missing`). E-mail versturen zou een providerkeuze vragen; dit werkt met n8n,
-  Zapier, Make, Slack of een eigen endpoint.
+- E-mail sturen bij een lead kan niet: er is alleen `LEAD_WEBHOOK_URL` (één JSON-POST, optioneel ondertekend met
+  `LEAD_WEBHOOK_SECRET`). E-mail versturen zou een providerkeuze en een account vragen; dit werkt met n8n,
+  Zapier, Make, Slack of een eigen endpoint. Zonder die variabele wordt een lead alleen opgeslagen en waarschuwt
+  de server bij het starten (`lead_webhook_missing`).

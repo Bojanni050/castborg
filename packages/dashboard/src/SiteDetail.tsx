@@ -2,6 +2,8 @@ import { useEffect, useState } from "preact/hooks";
 import {
   api,
   describeError,
+  type ConversationRow,
+  type DeletionRow,
   type HistoryRow,
   type LeadRow,
   type SiteState,
@@ -26,6 +28,8 @@ interface Draft {
   dailyBudgetEur: string;
   maxMessagesPerConversation: string;
   timezone: string;
+  conversationRetentionDays: string;
+  leadRetentionDays: string;
 }
 
 function toDraft(site: SiteState): Draft {
@@ -41,6 +45,8 @@ function toDraft(site: SiteState): Draft {
     dailyBudgetEur: String(site.settings.dailyBudgetEur),
     maxMessagesPerConversation: String(site.settings.maxMessagesPerConversation),
     timezone: site.settings.timezone,
+    conversationRetentionDays: String(site.settings.conversationRetentionDays),
+    leadRetentionDays: String(site.settings.leadRetentionDays),
   };
 }
 
@@ -75,6 +81,11 @@ function buildPatch(draft: Draft, site: SiteState): Record<string, unknown> {
   }
   if (draft.timezone !== s.timezone) patch.timezone = draft.timezone;
 
+  const convDays = Number(draft.conversationRetentionDays);
+  if (Number.isInteger(convDays) && convDays !== s.conversationRetentionDays) patch.conversationRetentionDays = convDays;
+  const leadDays = Number(draft.leadRetentionDays);
+  if (Number.isInteger(leadDays) && leadDays !== s.leadRetentionDays) patch.leadRetentionDays = leadDays;
+
   return patch;
 }
 
@@ -88,6 +99,8 @@ const FIELD_NAMES: Record<string, string> = {
   daily_budget_eur: "dagbudget",
   max_messages_per_conversation: "berichtlimiet",
   timezone: "tijdzone",
+  conversation_retention_days: "bewaartermijn gesprekken",
+  lead_retention_days: "bewaartermijn leads",
   name: "naam",
 };
 
@@ -96,6 +109,10 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
   const [draft, setDraft] = useState<Draft | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [leads, setLeads] = useState<LeadRow[]>([]);
+  const [conversations, setConversations] = useState<ConversationRow[]>([]);
+  const [deletions, setDeletions] = useState<DeletionRow[]>([]);
+  /** Id van de rij die op bevestiging wacht. Verwijderen is niet terug te draaien, dus geen eenklikactie. */
+  const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -115,13 +132,82 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
 
   async function load() {
     try {
-      const [state, hist, leadList] = await Promise.all([api.site(id), api.history(id), api.leads(id)]);
+      const [state, hist, leadList, convList, deletionList] = await Promise.all([
+        api.site(id),
+        api.history(id),
+        api.leads(id),
+        api.conversations(id),
+        api.deletions(id),
+      ]);
       setSite(state);
       setDraft(toDraft(state));
       setHistory(hist.history);
       setLeads(leadList.leads);
+      setConversations(convList.conversations);
+      setDeletions(deletionList.deletions);
     } catch (err) {
       if (!handleAuth(err)) setError(describeError(err));
+    }
+  }
+
+  /** Na een verwijdering alleen de lijsten verversen: het formulier niet, want dat zou onopgeslagen werk wissen. */
+  async function refreshLists() {
+    const [leadList, convList, deletionList] = await Promise.all([api.leads(id), api.conversations(id), api.deletions(id)]);
+    setLeads(leadList.leads);
+    setConversations(convList.conversations);
+    setDeletions(deletionList.deletions);
+  }
+
+  async function removeConversation(row: ConversationRow) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      const res = await api.deleteConversation(id, row.id);
+      const detached = res.deleted.leadsDetached > 0 ? ` ${res.deleted.leadsDetached} lead(s) blijven staan zonder gesprek.` : "";
+      setOk(`Gesprek verwijderd: ${res.deleted.messages} berichten.${detached}`);
+      setPending(null);
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeLead(lead: LeadRow) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      await api.deleteLead(id, lead.id);
+      setOk("Lead verwijderd.");
+      setPending(null);
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function purge() {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      const res = await api.runRetention(id);
+      setOk(
+        `Opgeruimd: ${res.deleted.conversations} gesprekken, ${res.deleted.messages} berichten, ${res.deleted.leads} leads.`,
+      );
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -327,6 +413,40 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
               <p class="hint">Bepaalt wanneer de dag van het budget begint.</p>
             </div>
           </div>
+          <div class="row">
+            <div class="field">
+              <label for="retconv">Bewaartermijn gesprekken (dagen)</label>
+              <input
+                id="retconv"
+                type="number"
+                min="0"
+                max="3650"
+                value={draft.conversationRetentionDays}
+                onInput={(e) => set("conversationRetentionDays", (e.target as HTMLInputElement).value)}
+              />
+              <p class={Number(draft.conversationRetentionDays) === 0 ? "hint warn" : "hint"}>
+                {Number(draft.conversationRetentionDays) === 0
+                  ? "0: nooit automatisch opruimen. Alles blijft tot je het zelf weghaalt."
+                  : "Gesprekken zonder activiteit worden na deze termijn verwijderd, met alle berichten."}
+              </p>
+            </div>
+            <div class="field">
+              <label for="retlead">Bewaartermijn leads (dagen)</label>
+              <input
+                id="retlead"
+                type="number"
+                min="0"
+                max="3650"
+                value={draft.leadRetentionDays}
+                onInput={(e) => set("leadRetentionDays", (e.target as HTMLInputElement).value)}
+              />
+              <p class={Number(draft.leadRetentionDays) === 0 ? "hint warn" : "hint"}>
+                {Number(draft.leadRetentionDays) === 0
+                  ? "0: nooit automatisch opruimen."
+                  : "Contactgegevens verdwijnen na deze termijn, ook als het gesprek blijft."}
+              </p>
+            </div>
+          </div>
         </div>
 
         <div class="section">
@@ -384,6 +504,55 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
       </form>
 
       <div class="section" style="margin-top:16px">
+        <h2>Gesprekken</h2>
+        <p class="hint">
+          Het gesprek verdwijnt met alle berichten. Een lead blijft staan, maar raakt zijn gesprek kwijt; de
+          kostenadministratie blijft kloppen.
+        </p>
+        {conversations.length === 0 ? (
+          <p class="empty">Nog geen gesprekken.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Laatst actief</th>
+                <th>Eerste bericht</th>
+                <th>Berichten</th>
+                <th>Lead</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {conversations.map((row) => (
+                <tr key={row.id}>
+                  <td class="site-meta">{when(row.updatedAt)}</td>
+                  <td class="lead-msg">{row.preview ?? "—"}</td>
+                  <td>{row.messageCount}</td>
+                  <td>{row.leadCount > 0 ? <span class="pill">{row.leadCount}</span> : "—"}</td>
+                  <td class="nowrap">
+                    {pending === row.id ? (
+                      <>
+                        <button class="danger" type="button" disabled={busy} onClick={() => removeConversation(row)}>
+                          Zeker weten
+                        </button>
+                        <button class="ghost" type="button" disabled={busy} onClick={() => setPending(null)}>
+                          Nee
+                        </button>
+                      </>
+                    ) : (
+                      <button class="ghost" type="button" disabled={busy} onClick={() => setPending(row.id)}>
+                        Verwijderen
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div class="section">
         <h2>Leads</h2>
         {leads.length === 0 ? (
           <p class="empty">Nog geen leads.</p>
@@ -396,6 +565,7 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
                 <th>Contact</th>
                 <th>Bericht</th>
                 <th>Status</th>
+                <th />
               </tr>
             </thead>
             <tbody>
@@ -411,6 +581,22 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
                   <td class="lead-msg">{lead.message ?? "—"}</td>
                   <td>
                     <span class="pill">{lead.status}</span>
+                  </td>
+                  <td class="nowrap">
+                    {pending === lead.id ? (
+                      <>
+                        <button class="danger" type="button" disabled={busy} onClick={() => removeLead(lead)}>
+                          Zeker weten
+                        </button>
+                        <button class="ghost" type="button" disabled={busy} onClick={() => setPending(null)}>
+                          Nee
+                        </button>
+                      </>
+                    ) : (
+                      <button class="ghost" type="button" disabled={busy} onClick={() => setPending(lead.id)}>
+                        Verwijderen
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -448,6 +634,50 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
                     <button class="ghost" type="button" disabled={busy} onClick={() => restore(row)}>
                       Terugzetten
                     </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div class="section">
+        <h2>Verwijderd</h2>
+        <p class="hint">
+          Wat er is weggegooid, met aantallen en zonder inhoud. Automatisch opruimen draait via
+          <code> pnpm retention</code> (cron op de server); met de knop hieronder doe je hetzelfde nu.
+        </p>
+        <div class="actions" style="margin: 8px 0 12px">
+          <button class="ghost" type="button" disabled={busy} onClick={purge}>
+            Nu opruimen volgens de termijnen
+          </button>
+        </div>
+        {deletions.length === 0 ? (
+          <p class="empty">Nog niets verwijderd.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Wanneer</th>
+                <th>Hoe</th>
+                <th>Wat</th>
+                <th>Aantal</th>
+                <th>Wie</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deletions.map((row) => (
+                <tr key={row.id}>
+                  <td class="site-meta">{when(row.ranAt)}</td>
+                  <td>{row.source === "retention" ? "automatisch" : "handmatig"}</td>
+                  <td>{row.subject === "conversation" ? "gesprekken" : "leads"}</td>
+                  <td>
+                    {row.subject === "conversation"
+                      ? `${row.conversations} gesprekken, ${row.messages} berichten`
+                      : `${row.leads} leads`}
+                  </td>
+                  <td class="site-meta">
+                    {row.actorType} · {row.actorId}
                   </td>
                 </tr>
               ))}

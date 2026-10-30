@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "migrate": "tsx --env-file=../../.env src/db/migrate.ts",
+    "retention": "tsx --env-file=../../.env src/db/retention-run.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "dev": "tsx watch --env-file=../../.env src/server.ts",

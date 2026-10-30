@@ -5,6 +5,7 @@
   "scripts": {
     "db:up": "docker compose up -d db",
     "db:migrate": "corepack pnpm --filter @ai-lead/api migrate",
+    "retention": "corepack pnpm --filter @ai-lead/api retention",
     "test": "corepack pnpm -r test",
     "typecheck": "corepack pnpm -r typecheck"
   },

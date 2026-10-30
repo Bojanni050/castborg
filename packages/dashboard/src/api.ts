@@ -21,6 +21,8 @@ export interface SiteSettings {
   dailyBudgetEur: number;
   maxMessagesPerConversation: number;
   timezone: string;
+  conversationRetentionDays: number;
+  leadRetentionDays: number;
   updatedAt: string;
 }
 
@@ -62,6 +64,28 @@ export interface LeadRow {
   message: string | null;
   status: string;
   createdAt: string;
+}
+
+export interface ConversationRow {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  leadCount: number;
+  /** Eerste bezoekersbericht, afgekapt. Zonder dit is een lijst met tijdstippen niet te beoordelen. */
+  preview: string | null;
+}
+
+export interface DeletionRow {
+  id: string;
+  ranAt: string;
+  source: "manual" | "retention";
+  subject: "conversation" | "lead";
+  conversations: number;
+  messages: number;
+  leads: number;
+  actorType: string;
+  actorId: string;
 }
 
 export class ApiError extends Error {
@@ -116,6 +140,24 @@ export const api = {
   restore: (id: string, historyId: string) =>
     request<SiteState>(`/api/v1/admin/sites/${id}/history/${historyId}/restore`, { method: "POST" }),
   leads: (id: string, limit = 50) => request<{ leads: LeadRow[] }>(`/api/v1/admin/sites/${id}/leads?limit=${limit}`),
+  conversations: (id: string, limit = 50) =>
+    request<{ conversations: ConversationRow[] }>(`/api/v1/admin/sites/${id}/conversations?limit=${limit}`),
+  deleteConversation: (id: string, conversationId: string) =>
+    request<{ deleted: { conversations: number; messages: number; leads: number; leadsDetached: number } }>(
+      `/api/v1/admin/sites/${id}/conversations/${conversationId}`,
+      { method: "DELETE" },
+    ),
+  deleteLead: (id: string, leadId: string) =>
+    request<{ deleted: { conversations: number; messages: number; leads: number } }>(`/api/v1/admin/sites/${id}/leads/${leadId}`, {
+      method: "DELETE",
+    }),
+  runRetention: (id: string) =>
+    request<{ deleted: { conversations: number; messages: number; leads: number; conversationRetentionDays: number; leadRetentionDays: number } }>(
+      `/api/v1/admin/sites/${id}/retention/run`,
+      { method: "POST" },
+    ),
+  deletions: (id: string, limit = 50) =>
+    request<{ deletions: DeletionRow[] }>(`/api/v1/admin/sites/${id}/deletions?limit=${limit}`),
 };
 
 /** Nederlandse tekst voor de fouten die de API echt teruggeeft. */
