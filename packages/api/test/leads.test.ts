@@ -1,3 +1,6 @@
+import { createHmac } from "node:crypto";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { createApp } from "../src/app.js";
@@ -9,7 +12,7 @@ import { ADMIN, APP_URL, MIGRATOR_URL, SECRET, migrateTestDb } from "./support.j
 let admin: pg.Client;
 let db: Db;
 
-function makeApp() {
+function makeApp(opts: { leadWebhook?: { url: string; secret?: string } } = {}) {
   return createApp({
     db,
     sessionSecret: SECRET,
@@ -17,6 +20,7 @@ function makeApp() {
     provider: new StubProvider(),
     pricing: { inputEurPerMTok: 0, outputEurPerMTok: 0 },
     maxOutputTokens: 800,
+    ...opts,
     limiters: { ipMessage: new RateLimiter(10_000, 60_000), message: new RateLimiter(10_000, 60_000) },
   });
 }
@@ -64,6 +68,37 @@ function submitLead(app: App, conversationId: string, token: string, body: unkno
     headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: json(body),
   });
+}
+
+interface Received {
+  raw: string;
+  body: Record<string, unknown>;
+  headers: Record<string, string | string[] | undefined>;
+}
+
+/** Kleine HTTP-ontvanger, zodat de webhook echt over de lijn gaat en de ondertekening te controleren is. */
+async function startReceiver(): Promise<{ server: Server; url: string; received: Received[] }> {
+  const received: Received[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      received.push({ raw, body: JSON.parse(raw) as Record<string, unknown>, headers: req.headers });
+      res.writeHead(200, { "content-type": "text/plain" }).end("ok");
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  return { server, url: `http://127.0.0.1:${port}/hook`, received };
+}
+
+async function waitFor(check: () => boolean, ms = 2000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > until) throw new Error("timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 beforeAll(async () => {
@@ -217,4 +252,95 @@ describe("leads lezen", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).leads).toHaveLength(0);
   });
+});
+
+describe("melding bij een lead", () => {
+  it("stuurt een ondertekende melding bij een nieuwe lead", async () => {
+    const receiver = await startReceiver();
+    try {
+      const app = makeApp({ leadWebhook: { url: receiver.url, secret: "s3cret" } });
+      const site = await createSite(app, "Lead Melding");
+      const { conversationId, token } = await startConversation(app, site.publicKey);
+
+      const res = await submitLead(app, conversationId, token, { name: "Bo", email: "Bo@Voorbeeld.nl" });
+      expect(res.status).toBe(201);
+      const { leadId } = (await res.json()) as { leadId: string };
+
+      await waitFor(() => receiver.received.length === 1);
+      const hit = receiver.received[0]!;
+      expect(hit.body).toMatchObject({
+        event: "lead.created",
+        leadId,
+        siteId: site.id,
+        siteName: "Lead Melding",
+        siteKey: site.publicKey,
+        conversationId,
+        name: "Bo",
+        email: "bo@voorbeeld.nl",
+        phone: null,
+      });
+      expect(String(hit.body.receivedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(hit.headers["x-ai-lead-event"]).toBe("lead.created");
+
+      const expected = createHmac("sha256", "s3cret").update(hit.raw).digest("hex");
+      expect(hit.headers["x-ai-lead-signature"]).toBe(`sha256=${expected}`);
+    } finally {
+      receiver.server.close();
+    }
+  });
+
+  it("meldt een bijgewerkte lead als updated", async () => {
+    const receiver = await startReceiver();
+    try {
+      const app = makeApp({ leadWebhook: { url: receiver.url } });
+      const site = await createSite(app, "Lead Melding Update");
+      const { conversationId, token } = await startConversation(app, site.publicKey);
+
+      await submitLead(app, conversationId, token, { email: "bo@voorbeeld.nl" });
+      await submitLead(app, conversationId, token, { email: "bo@voorbeeld.nl", phone: "+31612345678" });
+
+      await waitFor(() => receiver.received.length === 2);
+      expect(receiver.received.map((hit) => hit.body.event)).toEqual(["lead.created", "lead.updated"]);
+      expect(receiver.received[1]!.body.phone).toBe("+31612345678");
+      // Zonder geheim geen signature-header; wel de gebeurtenis, zodat de ontvanger kan routeren.
+      expect(receiver.received[0]!.headers["x-ai-lead-signature"]).toBeUndefined();
+    } finally {
+      receiver.server.close();
+    }
+  });
+
+  it("laat de lead niet mislukken als de webhook stuk is", async () => {
+    // Poort 1 luistert vrijwel zeker niet: verbinding geweigerd, meteen.
+    const app = makeApp({ leadWebhook: { url: "http://127.0.0.1:1/hook" } });
+    const site = await createSite(app, "Lead Melding Stuk");
+    const { conversationId, token } = await startConversation(app, site.publicKey);
+
+    const res = await submitLead(app, conversationId, token, { email: "bo@voorbeeld.nl" });
+    expect(res.status).toBe(201);
+    const { leadId } = (await res.json()) as { leadId: string };
+    const stored = await admin.query("SELECT 1 FROM leads WHERE id = $1", [leadId]);
+    expect(stored.rowCount).toBe(1);
+  });
+
+  it("slaat een lead met gevulde honeypot niet op en meldt hem niet", async () => {
+    const receiver = await startReceiver();
+    try {
+      const app = makeApp({ leadWebhook: { url: receiver.url } });
+      const site = await createSite(app, "Lead Honeypot");
+      const { conversationId, token } = await startConversation(app, site.publicKey);
+
+      const res = await submitLead(app, conversationId, token, { email: "bot@spam.nl", website: "http://spam" });
+      // Doen alsof het gelukt is: een bot die een fout ziet, past zijn invoer aan.
+      expect(res.status).toBe(201);
+      expect((await res.json()).created).toBe(true);
+
+      const stored = await admin.query("SELECT 1 FROM leads WHERE conversation_id = $1", [conversationId]);
+      expect(stored.rowCount).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(receiver.received).toHaveLength(0);
+    } finally {
+      receiver.server.close();
+    }
+  });
+
 });

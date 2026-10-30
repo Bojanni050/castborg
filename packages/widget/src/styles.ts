@@ -81,6 +81,8 @@ export function buildStyles(primaryColor: string, position: string): string {
 /* Leadformulier: één kaart tussen de berichten en het invoerveld. */
 .al-lead { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
   border-top: 1px solid #e2e8f0; background: #f8fafc; }
+/* Honeypot: buiten beeld, maar niet met display:none — sommige bots slaan verborgen velden over. */
+.al-hp { position: absolute; left: -9999px; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .al-lead-title { font-size: 13px; font-weight: 600; color: #0f172a; }
 .al-lead-hint { font-size: 12px; line-height: 1.45; color: #64748b; }
 .al-lead input, .al-lead textarea { width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;

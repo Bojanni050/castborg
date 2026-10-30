@@ -13,7 +13,8 @@ import {
   type WidgetConfigResponse,
 } from "@ai-lead/shared";
 import { resolveSiteByPublicKey, withTenant, type Actor, type Db } from "./db/tenant.js";
-import { logProviderError } from "./log.js";
+import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
+import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
 import { RateLimiter } from "./ratelimit.js";
 import { issueSessionToken, verifySessionToken, type SessionClaims } from "./token.js";
@@ -46,6 +47,11 @@ export interface AppDeps {
    * Zodra de UI modellen laat kiezen hoort de prijs per model in de database en verdwijnt dit veld.
    */
   modelOverride?: string;
+  /**
+   * Waar een binnengekomen lead naartoe gaat. Zonder webhook wordt een lead alleen opgeslagen;
+   * dat is precies de situatie waarin niemand hem leest, dus in productie hoort dit gezet te zijn.
+   */
+  leadWebhook?: LeadWebhookConfig;
   limiters?: {
     config?: RateLimiter;
     conversationStart?: RateLimiter;
@@ -179,7 +185,16 @@ const SETTINGS_COLUMNS = {
 } as const;
 
 export function createApp(deps: AppDeps): Hono {
-  const { db, sessionSecret, adminTokens, provider, pricing, maxOutputTokens, modelOverride } = deps;
+  const {
+    db,
+    sessionSecret,
+    adminTokens,
+    provider,
+    pricing,
+    maxOutputTokens,
+    modelOverride,
+    leadWebhook,
+  } = deps;
   const limits = {
     config: deps.limiters?.config ?? new RateLimiter(120, 60_000),
     conversationStart: deps.limiters?.conversationStart ?? new RateLimiter(20, 60_000),
@@ -704,11 +719,28 @@ export function createApp(deps: AppDeps): Hono {
 
     const parsed = submitLeadInput.safeParse(normalizeLeadBody(await readJson(c)));
     if (!parsed.success) return c.json({ error: "invalid_input", hint: "minstens e-mail of telefoon" }, 400);
-    const input = parsed.data;
+    const { website, ...input } = parsed.data;
+
+    // Honeypot: gevuld betekent bots. Antwoorden alsof het gelukt is, niets opslaan, geen melding.
+    // Een bot die een fout terugkrijgt, past zijn invoer aan en probeert opnieuw.
+    if (website) {
+      logEvent("warn", "lead_honeypot", { siteId: claims.siteId, conversationId: claims.conversationId });
+      return c.json({ leadId: randomUUID(), created: true }, 201);
+    }
 
     const result = await withTenant(db, claims.siteId, async (q) => {
-      const conv = await q.query("SELECT 1 FROM conversations WHERE id = $1", [claims.conversationId]);
-      if (conv.rowCount === 0) return null;
+      // Geen tijdsdrempel op de leeftijd van het gesprek: de widget maakt dat gesprek pas aan op het
+      // moment van versturen, dus een bezoeker die meteen zijn gegevens invult zou anders verdwijnen.
+      const conv = (
+        await q.query<{ site_name: string; public_key: string }>(
+          `SELECT s.name AS site_name, s.public_key
+             FROM conversations c
+             JOIN sites s ON s.id = c.site_id
+            WHERE c.id = $1`,
+          [claims.conversationId],
+        )
+      ).rows[0];
+      if (!conv) return null;
 
       const existing = (
         await q.query<{ id: string }>("SELECT id FROM leads WHERE conversation_id = $1", [claims.conversationId])
@@ -736,10 +768,35 @@ export function createApp(deps: AppDeps): Hono {
       ).rows[0]!;
 
       await q.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [claims.conversationId]);
-      return { leadId: row.id, created: existing === 0 };
+      return {
+        kind: "stored" as const,
+        leadId: row.id,
+        created: existing === 0,
+        siteName: conv.site_name,
+        siteKey: conv.public_key,
+      };
     });
     if (!result) return c.json({ error: "not_found" }, 404);
-    return c.json(result, result.created ? 201 : 200);
+
+    // Na de commit, en met een korte timeout: de bezoeker wacht erop, dus dit mag niet blijven hangen.
+    // notifyLead slikt fouten in en logt ze; een kapotte webhook mag nooit een lead laten mislukken.
+    if (leadWebhook) {
+      await notifyLead(leadWebhook, {
+        event: result.created ? "lead.created" : "lead.updated",
+        leadId: result.leadId,
+        siteId: claims.siteId,
+        siteName: result.siteName,
+        siteKey: result.siteKey,
+        conversationId: claims.conversationId,
+        name: input.name ?? null,
+        email: input.email ?? null,
+        phone: input.phone ?? null,
+        message: input.message ?? null,
+        receivedAt: new Date().toISOString(),
+      });
+    }
+
+    return c.json({ leadId: result.leadId, created: result.created }, result.created ? 201 : 200);
   });
 
   return app;

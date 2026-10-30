@@ -54,6 +54,16 @@ if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) fail("MAX_OUTPUT
  */
 const modelOverride = process.env.MISTRAL_MODEL?.trim() || undefined;
 
+/**
+ * Waar een lead naartoe gaat. Zonder deze variabele wordt een lead alleen opgeslagen, en dan leest
+ * niemand hem. Optioneel geheim: de body wordt dan ondertekend met HMAC-SHA256.
+ */
+const leadWebhookUrl = process.env.LEAD_WEBHOOK_URL?.trim();
+if (leadWebhookUrl && !/^https?:\/\//i.test(leadWebhookUrl)) fail("LEAD_WEBHOOK_URL moet met http:// of https:// beginnen");
+const leadWebhook = leadWebhookUrl
+  ? { url: leadWebhookUrl, secret: process.env.LEAD_WEBHOOK_SECRET?.trim() || undefined }
+  : undefined;
+
 const providerName = process.env.PROVIDER ?? "mistral";
 let provider: AiProvider;
 let pricing: Pricing;
@@ -87,6 +97,7 @@ const app = createApp({
   pricing,
   maxOutputTokens,
   modelOverride,
+  leadWebhook,
 });
 
 const port = Number(process.env.PORT ?? 8787);
@@ -96,6 +107,11 @@ serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
     logEvent("warn", "model_override_active", {
       model: modelOverride,
       note: "MISTRAL_MODEL overschrijft de site-instellingen; PATCH met een model geeft 409.",
+    });
+  }
+  if (!leadWebhook) {
+    logEvent("warn", "lead_webhook_missing", {
+      note: "Geen LEAD_WEBHOOK_URL: leads worden opgeslagen, maar niemand krijgt bericht.",
     });
   }
 });

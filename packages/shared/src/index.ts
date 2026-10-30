@@ -97,6 +97,8 @@ export type LeadInput = z.infer<typeof leadInput>;
  * Lege velden horen weggelaten te worden door de client; de API doet dat ook nog eens zelf.
  */
 export const submitLeadInput = leadInput
+  // Honeypot: onzichtbaar veld dat een mens nooit invult. Een bot die alle inputs vult, verraadt zich.
+  .extend({ website: z.string().max(200).optional() })
   .strict()
   .refine((v) => Boolean(v.email || v.phone), { message: "minstens e-mail of telefoon" });
 export type SubmitLeadInput = z.infer<typeof submitLeadInput>;

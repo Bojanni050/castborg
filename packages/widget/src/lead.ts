@@ -16,6 +16,11 @@ export interface LeadPayload {
   email?: string;
   phone?: string;
   message?: string;
+  /**
+   * Honeypot. Staat onzichtbaar in het formulier; een mens laat hem leeg, een bot vult hem.
+   * De server doet alsof het gelukt is en slaat niets op.
+   */
+  website?: string;
 }
 
 export type LeadFieldError = "contact" | "email" | "phone";

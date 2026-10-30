@@ -57,6 +57,28 @@ De widget moet de stream lezen met `fetch` + `ReadableStream` (EventSource kan g
 Beveiliging in deze slice: HMAC-sessietokens, rate limiting (IP+sleutel, per gesprek), berichtlimiet per gesprek uit `site_settings`,
 inputvalidatie met Zod, AI-aanroep buiten de databasetransactie, en de Origin-controle als *hygiëne* (niet als beveiliging: buiten browsers is Origin te vervalsen).
 
+### Leadmelding (webhook)
+
+Staat `LEAD_WEBHOOK_URL` gezet, dan POST de API elke nieuwe of bijgewerkte lead als JSON naar dat adres:
+
+```json
+{
+  "event": "lead.created",
+  "leadId": "…", "siteId": "…", "siteName": "…", "siteKey": "pk_…",
+  "conversationId": "…",
+  "name": "Bo Jansen", "email": "bo@voorbeeld.nl", "phone": null, "message": null,
+  "receivedAt": "2026-10-30T09:07:19.113Z"
+}
+```
+
+- `event` is `lead.created` of `lead.updated` (tweede inzending in hetzelfde gesprek).
+- Dezelfde waarden staan ook in de headers `x-ai-lead-event`; met `LEAD_WEBHOOK_SECRET` komt daar
+  `x-ai-lead-signature: sha256=<hex>` bij: HMAC-SHA256 over de *ruwe* body, dus bereken hem over de bytes
+  die je ontvangt en niet over een opnieuw geserialiseerde JSON.
+- De API wacht kort (3 s) op je endpoint en gaat daarna verder. Een time-out of een 4xx/5xx kost de lead niet:
+  hij staat al in de database en de fout komt als `lead_webhook_failed` in het log.
+- Een gevulde honeypot (`website`) of een onbekend gesprek levert géén melding op.
+
 ## AI-provider: Mistral
 
 - `MistralProvider` praat rechtstreeks met `POST {MISTRAL_BASE_URL}/v1/chat/completions` (standaard `https://api.mistral.ai`, de EU-server), met `fetch`, timeout en afbreken via `AbortSignal`.
@@ -163,5 +185,10 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
   Mistral en een bewaartermijn voor gesprekken. Beide horen bij de transparantieplicht en de AVG, niet bij "later".
 - Rate limiter is in geheugen: prima voor één instantie, vervangen zodra je meerdere draait.
 - `knowledge_*` (komt met fase 4).
-- Spamcheck/honeypot op het leadformulier, en iets dat de klant waarschuwt als er een lead binnenkomt
-  (nu moet je `GET /admin/sites/:id/leads` zelf pollen). E-mail of webhook is de logische volgende stap.
+- Spamcheck op het leadformulier is een honeypot: een onzichtbaar veld `website` dat een mens leeg laat.
+  Is het gevuld, dan antwoordt de API alsof het gelukt is en slaat niets op (`lead_honeypot` in het log).
+  Dat is genoeg voor domme formulier-bots; voor gerichte spam is rate limiting het echte antwoord.
+- De melding bij een lead gaat via `LEAD_WEBHOOK_URL` (één JSON-POST, optioneel ondertekend met
+  `LEAD_WEBHOOK_SECRET`). Zonder die variabele wordt een lead alleen opgeslagen en waarschuwt de server
+  bij het starten (`lead_webhook_missing`). E-mail versturen zou een providerkeuze vragen; dit werkt met n8n,
+  Zapier, Make, Slack of een eigen endpoint.

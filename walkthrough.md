@@ -160,3 +160,37 @@ deze aanpak), Actions (wat is gewijzigd).
   In de browser gecontroleerd: aanbieding na drie beurten, leeg verzenden geeft de juiste fout met twee rode
   velden, verzenden schrijft de lead (admin-route gaf `bo@example.nl`, getrimd en lowercase), formulier blijft
   weg na herladen, en bij budget 0 opent het formulier direct zonder "Later" met een uitgeschakeld invoerveld.
+
+## 2026-10-30 (Leadmelding via webhook, honeypot in het formulier)
+
+- Findings: een lead werd netjes opgeslagen, maar niemand wist dat hij bestond. De enige route was zelf
+  `GET /admin/sites/:id/leads` pollen. Voor een product dat "meer leads" moet opleveren is dat dezelfde fout
+  als een lead die niet wordt opgeslagen.
+- Conclusions: melden via `LEAD_WEBHOOK_URL` (één JSON-POST) in plaats van e-mail. E-mail vraagt een
+  providerkeuze en een account; een webhook werkt met n8n, Zapier, Make, een Slack-incoming-webhook of een
+  eigen endpoint, en is met een lokaal servertje in de test te controleren. `LEAD_WEBHOOK_SECRET` ondertekent
+  de body met HMAC-SHA256, zodat de ontvanger kan zien dat het bericht echt van deze API komt.
+- Conclusions: de API wacht kort (3 s) op de webhook en slikt elke fout in. De lead staat dan al in de
+  database, dus een kapotte webhook mag nooit een lead kosten; de fout komt als `lead_webhook_failed` in het
+  log. Zonder webhook waarschuwt de server bij het starten (`lead_webhook_missing`), want zwijgen is hier
+  precies het probleem.
+- Findings (en de belangrijkste les): ik had eerst ook een tijdsdrempel gebouwd — een lead binnen twee
+  seconden na de start van het gesprek zou een bot zijn. Bij het testen bleek dat de widget het gesprek pas
+  aanmaakt op het moment van versturen, dus een bezoeker die meteen zijn gegevens invult was "te snel" en
+  verdween in stilte, met een bevestiging in beeld. Weer eruit gehaald: een heuristiek die een echte lead kan
+  kosten is erger dan de spam die hij tegenhoudt. Alleen de honeypot blijft over.
+- Actions:
+  - `packages/api/src/lead-webhook.ts` (nieuw): `notifyLead` met timeout en HMAC-ondertekening.
+  - `packages/api/src/app.ts`: `leadWebhook` in `AppDeps`, honeypot-check vóór de transactie, melding na de
+    commit met `lead.created` / `lead.updated`.
+  - `packages/api/src/server.ts`: `LEAD_WEBHOOK_URL` / `LEAD_WEBHOOK_SECRET`, startwaarschuwing als hij mist.
+  - `packages/shared/src/index.ts`: `website` als honeypotveld in `submitLeadInput`.
+  - `packages/widget/src/lead.ts`, `ui/App.tsx`, `styles.ts`: verborgen veld buiten beeld (`-9999px`, niet
+    `display:none`, want sommige bots slaan verborgen velden over), mee in de payload.
+  - `packages/api/test/leads.test.ts`: +4 tests met een echte HTTP-ontvanger (ondertekening, updated,
+    kapotte webhook, honeypot).
+  - `.env.example` en `README.md`: payload, ondertekening en de honeypot uitgelegd.
+- Validatie: API 85/85, widget 31/31, typecheck en build schoon (33,70 kB / 12,70 kB gzip). End-to-end met een
+  eigen ontvanger op 127.0.0.1:9099: lead verstuurd in de browser, melding ontvangen, signature nagerekend en
+  gelijk. Honeypot end-to-end bewezen doordat mijn eigen test per ongeluk het verborgen veld vulde: server
+  logde `lead_honeypot`, sloeg niets op, widget toonde gewoon de bevestiging.

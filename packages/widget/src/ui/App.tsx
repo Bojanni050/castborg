@@ -49,6 +49,8 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
   const [lead, setLead] = useState<LeadDraft>(emptyLeadDraft);
   const [leadError, setLeadError] = useState<LeadFieldError | null>(null);
   const [leadSending, setLeadSending] = useState(false);
+  /** Honeypot: onzichtbaar veld. Een mens laat het leeg; een bot die alle inputs vult, verraadt zich. */
+  const [honey, setHoney] = useState("");
   /** De assistent is gestopt: dagbudget op of gesprekslimiet bereikt. Dan is doorgeven het enige dat nog werkt. */
   const [blocked, setBlocked] = useState(false);
 
@@ -160,7 +162,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
           apiBase,
           conversationId: active.conversationId,
           token: active.token,
-          lead: validated.payload,
+          lead: honey ? { ...validated.payload, website: honey } : validated.payload,
         });
 
       let activeSession = await ensureSession();
@@ -180,6 +182,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
       setLeadCaptured(true);
       setLeadOpen(false);
       setLead(emptyLeadDraft);
+      setHoney("");
       setMessages((prev) => [
         ...prev,
         {
@@ -262,6 +265,16 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
 
           {showLead ? (
             <form class="al-lead" onSubmit={sendLead} noValidate>
+              <input
+                class="al-hp"
+                type="text"
+                name="website"
+                tabIndex={-1}
+                autoComplete="off"
+                aria-hidden="true"
+                value={honey}
+                onInput={(event) => setHoney(event.currentTarget.value)}
+              />
               <span class="al-lead-title">Contactgegevens</span>
               <span class="al-lead-hint">
                 Laat je e-mailadres of telefoonnummer achter, dan neemt een medewerker contact op.
