@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { createApp, type Pricing } from "./app.js";
+import { createApp, type AdminToken, type Pricing } from "./app.js";
 import { createPool } from "./db/tenant.js";
 import { MistralProvider } from "./mistral.js";
 import { StubProvider, type AiProvider } from "./provider.js";
@@ -18,8 +18,33 @@ function requiredNumber(name: string): number {
   return Number.isFinite(n) && n >= 0 ? n : fail(`${name} moet een getal >= 0 zijn`);
 }
 
+/**
+ * Eén token is genoeg om te beginnen. Meerdere tokens met een naam (`ADMIN_TOKENS=bojan:tok1,anna:tok2`)
+ * geven meteen een bruikbare actor in de historie, zonder een volledig auth-systeem.
+ */
+function adminTokens(): AdminToken[] {
+  const multiple = process.env.ADMIN_TOKENS?.trim();
+  if (multiple) {
+    const parsed = multiple
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => {
+        const idx = entry.indexOf(":");
+        if (idx <= 0 || idx === entry.length - 1) fail(`ADMIN_TOKENS: verwacht naam:token, kreeg "${entry}"`);
+        return { name: entry.slice(0, idx).trim(), token: entry.slice(idx + 1).trim() };
+      });
+    if (parsed.length === 0) fail("ADMIN_TOKENS bevat geen bruikbare tokens");
+    return parsed;
+  }
+  return [{ name: process.env.ADMIN_TOKEN_NAME?.trim() || "admin", token: required("ADMIN_TOKEN") }];
+}
+
 const sessionSecret = required("SESSION_SECRET");
 if (sessionSecret.length < 32) fail("SESSION_SECRET moet minimaal 32 tekens zijn");
+
+const maxOutputTokens = process.env.MAX_OUTPUT_TOKENS ? Number(process.env.MAX_OUTPUT_TOKENS) : 800;
+if (!Number.isInteger(maxOutputTokens) || maxOutputTokens <= 0) fail("MAX_OUTPUT_TOKENS moet een positief geheel getal zijn");
 
 const providerName = process.env.PROVIDER ?? "mistral";
 let provider: AiProvider;
@@ -33,7 +58,7 @@ if (providerName === "stub") {
   provider = new MistralProvider({
     apiKey: required("MISTRAL_API_KEY"),
     baseUrl: process.env.MISTRAL_BASE_URL,
-    maxOutputTokens: process.env.MAX_OUTPUT_TOKENS ? Number(process.env.MAX_OUTPUT_TOKENS) : undefined,
+    maxOutputTokens,
   });
   // Bewust verplicht: zonder prijzen is het dagbudget betekenisloos. Controleer ze in je Mistral-account.
   pricing = {
@@ -47,9 +72,10 @@ if (providerName === "stub") {
 const app = createApp({
   db: createPool(required("DATABASE_URL_APP")),
   sessionSecret,
-  adminToken: required("ADMIN_TOKEN"),
+  adminTokens: adminTokens(),
   provider,
   pricing,
+  maxOutputTokens,
 });
 
 const port = Number(process.env.PORT ?? 8787);

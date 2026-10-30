@@ -52,6 +52,11 @@ export class ProviderError extends Error {
 
 const approxTokens = (s: string) => Math.ceil(s.length / 4);
 
+/** Grove schatting van het aantal inputtokens, gebruikt voor de budgetreservering vóór de call. */
+export function estimateInputTokens(text: string): number {
+  return approxTokens(text);
+}
+
 /** Grove schatting (±4 tekens per token), alleen als terugval wanneer de provider geen usage meegeeft. */
 export function estimateUsage(req: ProviderRequest, reply: string): Usage {
   const input = req.systemPrompt.length + req.history.reduce((n, t) => n + t.content.length, 0);

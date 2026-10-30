@@ -1,12 +1,23 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import pg from "pg";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migrationsDir = join(here, "..", "..", "migrations");
 
-export async function migrate(connectionString: string): Promise<string[]> {
+/**
+ * Past alle nog niet toegepaste migraties toe.
+ *
+ * `appRolePassword` is verplicht: de runtime-rol wordt in 0001 zonder wachtwoord aangemaakt en
+ * krijgt het hier. Zo staat er geen wachtwoord in een migratiebestand en kan de rol niet inloggen
+ * voordat iemand bewust een wachtwoord heeft gezet.
+ */
+export async function migrate(connectionString: string, appRolePassword: string): Promise<string[]> {
+  if (!appRolePassword || appRolePassword.length < 16) {
+    throw new Error("APP_DB_PASSWORD moet minimaal 16 tekens zijn");
+  }
+
   const client = new pg.Client({ connectionString });
   await client.connect();
   const applied: string[] = [];
@@ -34,20 +45,41 @@ export async function migrate(connectionString: string): Promise<string[]> {
         throw new Error(`Migration ${file} mislukt: ${(err as Error).message}`);
       }
     }
+
+    // Idempotent: ook als er niets te migreren viel, klopt het wachtwoord na afloop.
+    await client.query("ALTER ROLE ailead_app PASSWORD " + quoteLiteral(appRolePassword));
   } finally {
     await client.end();
   }
   return applied;
 }
 
+/** SQL-literal met verdubbelde quotes; ALTER ROLE accepteert geen parameters. */
+function quoteLiteral(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
 // CLI: `pnpm db:migrate`
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Let op: `file://${process.argv[1]}` werkt niet op Windows (import.meta.url heeft drie schuine
+// strepen), waardoor dit blok stil werd overgeslagen en de migratie niets deed.
+if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {
   const url = process.env.DATABASE_URL_MIGRATOR;
   if (!url) {
     console.error("DATABASE_URL_MIGRATOR ontbreekt");
     process.exit(1);
   }
-  migrate(url).then((applied) => {
-    console.log(applied.length ? `Toegepast: ${applied.join(", ")}` : "Niets te doen");
-  });
+  const password = process.env.APP_DB_PASSWORD;
+  if (!password) {
+    console.error("APP_DB_PASSWORD ontbreekt (wachtwoord voor de runtime-rol ailead_app)");
+    process.exit(1);
+  }
+  migrate(url, password).then(
+    (applied) => {
+      console.log(applied.length ? `Toegepast: ${applied.join(", ")}` : "Niets te doen");
+    },
+    (err: unknown) => {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    },
+  );
 }

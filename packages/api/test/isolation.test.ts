@@ -1,12 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
-import { migrate } from "../src/db/migrate.js";
 import { createPool, resolveSiteByPublicKey, withTenant, type Db } from "../src/db/tenant.js";
-
-const MIGRATOR_URL =
-  process.env.DATABASE_URL_MIGRATOR ?? "postgres://postgres:postgres@127.0.0.1:5432/ailead";
-const APP_URL =
-  process.env.DATABASE_URL_APP ?? "postgres://ailead_app:change-me-in-production@127.0.0.1:5432/ailead";
+import { APP_URL, MIGRATOR_URL, migrateTestDb } from "./support.js";
 
 let admin: pg.Client; // superuser/eigenaar: alleen voor seeding
 let app: Db; // runtime-rol: onderworpen aan RLS
@@ -25,7 +20,7 @@ async function seedSite(name: string, publicKey: string): Promise<string> {
 }
 
 beforeAll(async () => {
-  await migrate(MIGRATOR_URL);
+  await migrateTestDb();
   admin = new pg.Client({ connectionString: MIGRATOR_URL });
   await admin.connect();
   await admin.query("TRUNCATE sites CASCADE");

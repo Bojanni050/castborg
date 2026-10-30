@@ -13,11 +13,13 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 -- ---------------------------------------------------------------------------
 -- Rol voor de API-runtime
 -- ---------------------------------------------------------------------------
+-- Bewust zonder wachtwoord: een rol zonder wachtwoord kan niet inloggen (fail closed).
+-- `pnpm db:migrate` zet het wachtwoord uit APP_DB_PASSWORD met ALTER ROLE, zodat er geen
+-- wachtwoord in een migratiebestand staat en een vergeten variabele meteen opvalt.
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ailead_app') THEN
-    CREATE ROLE ailead_app LOGIN PASSWORD 'change-me-in-production'
-      NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
+    CREATE ROLE ailead_app LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS;
   END IF;
 END
 $$;

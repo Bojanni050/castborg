@@ -1,19 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { createApp, normalizeDomain } from "../src/app.js";
-import { migrate } from "../src/db/migrate.js";
 import { createPool, withTenant, type Db } from "../src/db/tenant.js";
 import { RateLimiter } from "../src/ratelimit.js";
 import { StubProvider, type ProviderRequest } from "../src/provider.js";
 import { issueSessionToken, verifySessionToken } from "../src/token.js";
-
-const MIGRATOR_URL =
-  process.env.DATABASE_URL_MIGRATOR ?? "postgres://postgres:postgres@127.0.0.1:5432/ailead";
-const APP_URL =
-  process.env.DATABASE_URL_APP ?? "postgres://ailead_app:change-me-in-production@127.0.0.1:5432/ailead";
-
-const SECRET = "x".repeat(40);
-const ADMIN = "admin-test-token";
+import { ADMIN, APP_URL, MIGRATOR_URL, SECRET, migrateTestDb } from "./support.js";
 
 let admin: pg.Client;
 let db: Db;
@@ -30,9 +22,10 @@ function makeApp(limiters?: Parameters<typeof createApp>[0]["limiters"]) {
   return createApp({
     db,
     sessionSecret: SECRET,
-    adminToken: ADMIN,
+    adminTokens: [{ name: "test", token: ADMIN }],
     provider,
     pricing: { inputEurPerMTok: 0, outputEurPerMTok: 0 },
+    maxOutputTokens: 800,
     limiters,
   });
 }
@@ -58,7 +51,7 @@ async function startConversation(app: ReturnType<typeof makeApp>, key: string, o
 }
 
 beforeAll(async () => {
-  await migrate(MIGRATOR_URL);
+  await migrateTestDb();
   admin = new pg.Client({ connectionString: MIGRATOR_URL });
   await admin.connect();
   await admin.query("TRUNCATE sites CASCADE");

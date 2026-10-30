@@ -4,11 +4,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "migrate": "tsx src/db/migrate.ts",
+    "migrate": "tsx --env-file=../../.env src/db/migrate.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "dev": "tsx watch src/server.ts",
-    "start": "tsx src/server.ts"
+    "dev": "tsx watch --env-file=../../.env src/server.ts",
+    "start": "tsx --env-file=../../.env src/server.ts"
   },
   "dependencies": {
     "@ai-lead/shared": "workspace:*",

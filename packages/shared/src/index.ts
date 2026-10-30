@@ -23,11 +23,59 @@ export const widgetConfigResponse = z.object({
 });
 export type WidgetConfigResponse = z.infer<typeof widgetConfigResponse>;
 
+/** Vorm van de beheervelden; gedeeld door aanmaken, wijzigen en terugdraaien. */
+const systemPromptSchema = z.string().min(1).max(4000);
+const greetingSchema = z.string().min(1).max(500);
+const openingQuestionSchema = z.string().max(300).nullable();
+const widgetPositionSchema = z.enum(["bottom-right", "bottom-left"]);
+const primaryColorSchema = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+const modelSchema = z.string().min(1).max(120);
+const dailyBudgetSchema = z.number().min(0).max(10000);
+const maxMessagesSchema = z.number().int().min(2).max(200);
+const timezoneSchema = z.string().min(1).max(64);
+
 export const createSiteInput = z.object({
   name: z.string().min(1).max(120),
   domains: z.array(z.string().min(3).max(253)).min(1),
+  systemPrompt: systemPromptSchema.optional(),
+  greeting: greetingSchema.optional(),
+  openingQuestion: openingQuestionSchema.optional(),
+  widgetPosition: widgetPositionSchema.optional(),
+  primaryColor: primaryColorSchema.optional(),
+  model: modelSchema.optional(),
+  dailyBudgetEur: dailyBudgetSchema.optional(),
+  maxMessagesPerConversation: maxMessagesSchema.optional(),
+  timezone: timezoneSchema.optional(),
 });
 export type CreateSiteInput = z.infer<typeof createSiteInput>;
+
+/**
+ * PATCH: alleen wat meegaat wordt gewijzigd. Een lege body is een fout, geen no-op.
+ * `domains` vervangt de hele lijst; dat is bewust, want samenvoegen laat je nooit domeinen
+ * verwijderen zonder de hele lijst te sturen.
+ */
+export const updateSiteSettingsInput = z
+  .object({
+    name: z.string().min(1).max(120),
+    domains: z.array(z.string().min(3).max(253)).min(1),
+    systemPrompt: systemPromptSchema,
+    greeting: greetingSchema,
+    openingQuestion: openingQuestionSchema,
+    widgetPosition: widgetPositionSchema,
+    primaryColor: primaryColorSchema,
+    model: modelSchema,
+    dailyBudgetEur: dailyBudgetSchema,
+    maxMessagesPerConversation: maxMessagesSchema,
+    timezone: timezoneSchema,
+  })
+  .partial()
+  .strict()
+  .refine((v) => Object.keys(v).length > 0, { message: "minstens één veld" });
+export type UpdateSiteSettingsInput = z.infer<typeof updateSiteSettingsInput>;
+
+export const siteSettingsHistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
 
 export const sendMessageInput = z.object({
   conversationId: z.string().uuid().optional(),

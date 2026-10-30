@@ -3,17 +3,10 @@ import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { createApp } from "../src/app.js";
-import { migrate } from "../src/db/migrate.js";
 import { createPool, type Db } from "../src/db/tenant.js";
 import { MistralProvider } from "../src/mistral.js";
 import { RateLimiter } from "../src/ratelimit.js";
-
-const MIGRATOR_URL =
-  process.env.DATABASE_URL_MIGRATOR ?? "postgres://postgres:postgres@127.0.0.1:5432/ailead";
-const APP_URL =
-  process.env.DATABASE_URL_APP ?? "postgres://ailead_app:change-me-in-production@127.0.0.1:5432/ailead";
-const SECRET = "y".repeat(40);
-const ADMIN = "admin-test-token";
+import { ADMIN, APP_URL, MIGRATOR_URL, SECRET, migrateTestDb } from "./support.js";
 
 // Hoge prijzen zodat een paar tokens al zichtbare kosten geven: 20 in + 5 uit = 0,02 + 0,01 = 0,03 euro
 const PRICING = { inputEurPerMTok: 1000, outputEurPerMTok: 2000 };
@@ -40,13 +33,16 @@ function makeApp() {
   return createApp({
     db,
     sessionSecret: SECRET,
-    adminToken: ADMIN,
+    adminTokens: [{ name: "test", token: ADMIN }],
     provider: new MistralProvider({
       apiKey: "k",
       baseUrl: `http://127.0.0.1:${(fake.address() as AddressInfo).port}`,
       timeoutMs: 5000,
     }),
     pricing: PRICING,
+    // Klein, zodat de budgetreservering (maxOutputTokens x outputprijs) niet boven de
+    // testbudgetten uitkomt. In productie is de reservering de worst case van één beurt.
+    maxOutputTokens: 4,
     limiters: { message: new RateLimiter(1000, 60_000) },
   });
 }
@@ -98,7 +94,7 @@ async function waitFor<T>(fn: () => Promise<T | undefined | false>, ms = 3000): 
 }
 
 beforeAll(async () => {
-  await migrate(MIGRATOR_URL);
+  await migrateTestDb();
   admin = new pg.Client({ connectionString: MIGRATOR_URL });
   await admin.connect();
   await admin.query("TRUNCATE sites CASCADE");
@@ -176,7 +172,9 @@ describe("streaming-route", () => {
     const res = await stream(app, c);
     expect(res.status).toBe(200); // de stream is al geopend
     const events = parseSse(await res.text());
-    expect(events).toEqual([{ event: "error", data: { error: "provider_unavailable" } }]);
+    // requestId wordt meegestuurd zodat een bezoeker of beheerder de fout kan terugzoeken in het log.
+    expect(events).toMatchObject([{ event: "error", data: { error: "provider_unavailable" } }]);
+    expect((events[0]!.data as { requestId?: string }).requestId).toMatch(/^[0-9a-f-]{36}$/);
 
     const msgs = await admin.query("SELECT role FROM messages WHERE conversation_id = $1", [c.conversationId]);
     expect(msgs.rows).toEqual([{ role: "user" }]);
@@ -194,12 +192,14 @@ describe("streaming-route", () => {
     const c = await newConversation(app, "Halverwege");
     const events = parseSse(await (await stream(app, c)).text());
     expect(events[0]).toEqual({ event: "delta", data: { text: "Half" } });
-    expect(events.at(-1)).toEqual({ event: "error", data: { error: "provider_unavailable" } });
+    expect(events.at(-1)).toMatchObject({ event: "error", data: { error: "provider_unavailable" } });
 
     const a = (await admin.query("SELECT content FROM messages WHERE conversation_id = $1 AND role = 'assistant'", [c.conversationId])).rows;
     expect(a).toEqual([{ content: "Half" }]);
+    // De provider viel weg: dat is een mislukte beurt, geen gratis succes. Het deel dat al
+    // getoond is blijft bewaard, maar de registratie liegt er niet over.
     const u = (await admin.query("SELECT status, estimated FROM usage_events WHERE conversation_id = $1", [c.conversationId])).rows;
-    expect(u).toEqual([{ status: "ok", estimated: true }]);
+    expect(u).toEqual([{ status: "error", estimated: true }]);
   });
 
   it("de client breekt af: de aanvraag naar de provider stopt en het deel dat al getoond is wordt bewaard", async () => {
@@ -234,7 +234,8 @@ describe("dagbudget", () => {
     handler = (_q, res) => happyStream(res); // 0,03 euro per beurt
     const app = makeApp();
     const c = await newConversation(app, "Budget");
-    await admin.query("UPDATE site_settings SET daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
+    // Korte prompt: de inputschatting telt mee in de reservering, dus houd die deterministisch.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
 
     expect((await (await stream(app, c, "een")).text()).includes("event: done")).toBe(true); // totaal 0,03
     expect((await (await stream(app, c, "twee")).text()).includes("event: done")).toBe(true); // totaal 0,06 >= 0,05
@@ -256,7 +257,8 @@ describe("dagbudget", () => {
     const app = makeApp();
     const a = await newConversation(app, "BudgetA");
     const b = await newConversation(app, "BudgetB");
-    await admin.query("UPDATE site_settings SET daily_budget_eur = 0.01 WHERE site_id = $1", [a.site.id]);
+    // 0,02 is genoeg voor de reservering van de eerste beurt (0,018) maar niet voor een tweede.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.02 WHERE site_id = $1", [a.site.id]);
 
     await (await stream(app, a)).text();
     expect((await stream(app, a)).status).toBe(503); // A is op
@@ -267,7 +269,8 @@ describe("dagbudget", () => {
     handler = (_q, res) => happyStream(res);
     const app = makeApp();
     const c = await newConversation(app, "Gisteren");
-    await admin.query("UPDATE site_settings SET daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
+    // Korte prompt: de inputschatting telt mee in de reservering, dus houd die deterministisch.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
     await admin.query(
       `INSERT INTO usage_events (site_id, provider, model, cost_eur, status, created_at)
        VALUES ($1, 'mistral', 'm', 99, 'ok', now() - interval '2 days')`,

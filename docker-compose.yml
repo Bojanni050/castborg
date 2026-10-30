@@ -7,7 +7,8 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: ailead
     ports:
-      - "127.0.0.1:5432:5432"
+      # 5432 is bezet door de lokale Postgres-service op deze machine; 5434 door een ander project.
+      - "127.0.0.1:5435:5432"
     volumes:
       - dbdata:/var/lib/postgresql/data
     healthcheck:
