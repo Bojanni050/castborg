@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
 import { createApp, type AdminToken, type Pricing } from "./app.js";
 import { createPool } from "./db/tenant.js";
@@ -64,6 +66,30 @@ const leadWebhook = leadWebhookUrl
   ? { url: leadWebhookUrl, secret: process.env.LEAD_WEBHOOK_SECRET?.trim() || undefined }
   : undefined;
 
+/**
+ * Dashboard-login: één operator, één wachtwoord. Optioneel, maar zonder deze variabele kan niemand
+ * inloggen (de loginroute antwoordt dan 503 in plaats van te doen alsof).
+ *
+ * Het wachtwoord staat bewust niet in de database: er is geen users-tabel, dus er is ook niets om te
+ * hashen. Zodra meerdere mensen of klanten inloggen, verhuist dit naar een rij per gebruiker.
+ */
+const dashboardPassword = process.env.DASHBOARD_PASSWORD?.trim() || undefined;
+if (dashboardPassword && dashboardPassword.length < 12) fail("DASHBOARD_PASSWORD moet minimaal 12 tekens zijn");
+const dashboard = dashboardPassword
+  ? {
+      password: dashboardPassword,
+      actorId: process.env.DASHBOARD_ACTOR?.trim() || "owner",
+      cookieSecure: process.env.COOKIE_SECURE === "true",
+    }
+  : undefined;
+
+/**
+ * De gebouwde dashboard-app, als die er is. Zelfde origin als de API, zodat de sessiecookie werkt
+ * zonder CORS met credentials. Ontbreekt de map, dan draait de API gewoon zonder dashboard.
+ */
+const staticDirUrl = new URL("../../dashboard/dist", import.meta.url);
+const staticDir = existsSync(fileURLToPath(staticDirUrl)) ? fileURLToPath(staticDirUrl) : undefined;
+
 const providerName = process.env.PROVIDER ?? "mistral";
 let provider: AiProvider;
 let pricing: Pricing;
@@ -93,6 +119,8 @@ const app = createApp({
   db: createPool(required("DATABASE_URL_APP")),
   sessionSecret,
   adminTokens: adminTokens(),
+  dashboard,
+  staticDir,
   provider,
   pricing,
   maxOutputTokens,
@@ -112,6 +140,16 @@ serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
   if (!leadWebhook) {
     logEvent("warn", "lead_webhook_missing", {
       note: "Geen LEAD_WEBHOOK_URL: leads worden opgeslagen, maar niemand krijgt bericht.",
+    });
+  }
+  if (!dashboard) {
+    logEvent("warn", "dashboard_login_disabled", {
+      note: "Geen DASHBOARD_PASSWORD: het dashboard is bereikbaar maar niemand kan inloggen. Beheer loopt nu via ADMIN_TOKEN.",
+    });
+  }
+  if (!staticDir) {
+    logEvent("warn", "dashboard_build_missing", {
+      note: "Geen packages/dashboard/dist: alleen de API draait. Bouw het dashboard met corepack pnpm --filter @ai-lead/dashboard build.",
     });
   }
 });

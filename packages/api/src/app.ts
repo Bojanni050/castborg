@@ -1,10 +1,12 @@
 import { randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import type { PoolClient } from "pg";
 import { getConnInfo } from "@hono/node-server/conninfo";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
   createSiteInput,
+  dashboardLoginInput,
   leadsQuery,
   sendMessageInput,
   siteSettingsHistoryQuery,
@@ -13,6 +15,16 @@ import {
   type WidgetConfigResponse,
 } from "@ai-lead/shared";
 import { resolveSiteByPublicKey, withTenant, type Actor, type Db } from "./db/tenant.js";
+import {
+  clearCookie,
+  issueDashboardToken,
+  readCookie,
+  serializeCookie,
+  verifyDashboardToken,
+  verifyPassword,
+  DASHBOARD_COOKIE,
+  type DashboardAuthConfig,
+} from "./dashboard-auth.js";
 import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
 import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
@@ -35,8 +47,15 @@ export interface AppDeps {
   /** Pool met de runtime-rol (ailead_app). Nooit de eigenaar/superuser. */
   db: Db;
   sessionSecret: string;
-  /** TIJDELIJK tot dashboard-auth in fase 1: statische tokens voor site-beheer. */
+  /** Statische tokens voor scripts en tests. Het dashboard gebruikt de cookie hieronder. */
   adminTokens: AdminToken[];
+  /**
+   * Inloggen op het dashboard. Zonder deze config bestaat het dashboard wel, maar kan niemand in:
+   * de loginroute antwoordt dan met 503 in plaats van te doen alsof.
+   */
+  dashboard?: DashboardAuthConfig;
+  /** Map met de gebouwde dashboard-app. Leeg in tests; in productie zet de server hier een pad neer. */
+  staticDir?: string;
   provider: AiProvider;
   pricing: Pricing;
   /** Bovengrens per antwoord; dezelfde waarde als de provider gebruikt, anders rekent het budget scheef. */
@@ -57,6 +76,7 @@ export interface AppDeps {
     conversationStart?: RateLimiter;
     message?: RateLimiter;
     ipMessage?: RateLimiter;
+    dashboardLogin?: RateLimiter;
   };
 }
 
@@ -189,6 +209,8 @@ export function createApp(deps: AppDeps): Hono {
     db,
     sessionSecret,
     adminTokens,
+    dashboard,
+    staticDir,
     provider,
     pricing,
     maxOutputTokens,
@@ -200,6 +222,8 @@ export function createApp(deps: AppDeps): Hono {
     conversationStart: deps.limiters?.conversationStart ?? new RateLimiter(20, 60_000),
     message: deps.limiters?.message ?? new RateLimiter(30, 60_000),
     ipMessage: deps.limiters?.ipMessage ?? new RateLimiter(120, 60_000),
+    // Raden van een wachtwoord is alleen interessant als het vaak mag; 10 per kwartier per adres.
+    dashboardLogin: deps.limiters?.dashboardLogin ?? new RateLimiter(10, 15 * 60_000),
   };
 
   const costEur = (u: Usage) => (u.inputTokens * pricing.inputEurPerMTok + u.outputTokens * pricing.outputEurPerMTok) / 1_000_000;
@@ -347,16 +371,28 @@ export function createApp(deps: AppDeps): Hono {
         ? c.json({ error: "conversation_limit" }, 429)
         : c.json({ error: "budget_exceeded" }, 503);
 
-  /** Beheerder authenticeren. Meerdere tokens met een naam geven meteen een bruikbare actor. */
-  function authenticateAdmin(c: Context): Actor | null {
+  /**
+   * Wie beheert er? Twee wegen, één actor:
+   * - Bearer-token uit ADMIN_TOKENS: voor scripts, tests en noodgevallen.
+   * - Dashboardcookie: voor een mens in de browser.
+   * De actor komt uit de gebruikte weg, want dat is precies wat de historie moet laten zien.
+   */
+  function authenticateOperator(c: Context): Actor | null {
     const bearer = (c.req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
-    if (!bearer) return null;
-    let found: Actor | null = null;
-    // Alle tokens vergelijken (geen vroege exit) zodat de duur niets verraadt.
-    for (const t of adminTokens) {
-      if (safeEqual(bearer, t.token)) found = { type: "admin_token", id: t.name };
+    if (bearer) {
+      let found: Actor | null = null;
+      // Alle tokens vergelijken (geen vroege exit) zodat de duur niets verraadt.
+      for (const t of adminTokens) {
+        if (safeEqual(bearer, t.token)) found = { type: "admin_token", id: t.name };
+      }
+      return found;
     }
-    return found;
+    if (!dashboard) return null;
+    const token = readCookie(c.req.header("cookie"), DASHBOARD_COOKIE);
+    if (!token) return null;
+    const claims = verifyDashboardToken(token, sessionSecret);
+    if (!claims) return null;
+    return { type: "user", id: claims.sub };
   }
 
   /** Model tijdelijk uit de omgeving: één bron, geen instelling die niets doet. */
@@ -380,10 +416,75 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/api/v1/health", (c) => c.json({ ok: true }));
 
   // ---------------------------------------------------------------------------
+  // Dashboard: wie ben je, en wat zie je
+  // ---------------------------------------------------------------------------
+  app.post("/api/v1/dashboard/login", async (c) => {
+    if (!dashboard) {
+      return c.json({ error: "not_configured", message: "Er is geen DASHBOARD_PASSWORD ingesteld." }, 503);
+    }
+    if (!limits.dashboardLogin.check(`login:${clientIp(c)}`)) {
+      return c.json({ error: "rate_limited" }, 429);
+    }
+    const parsed = dashboardLoginInput.safeParse(await readJson(c));
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+    if (!verifyPassword(parsed.data.password, dashboard.password)) {
+      // Geen verschil tussen "onbekende gebruiker" en "fout wachtwoord": er is maar één gebruiker.
+      logEvent("warn", "dashboard_login_failed", { ip: clientIp(c) });
+      return c.json({ error: "unauthorized" }, 401);
+    }
+
+    const ttl = dashboard.ttlSeconds ?? 8 * 60 * 60;
+    const token = issueDashboardToken({ sub: dashboard.actorId }, sessionSecret, ttl);
+    c.header("set-cookie", serializeCookie(token, dashboard));
+    logEvent("info", "dashboard_login_ok", { actor: dashboard.actorId });
+    return c.json({ actor: { type: "user", id: dashboard.actorId }, expiresInSeconds: ttl, modelOverride: modelOverride ?? null });
+  });
+
+  app.post("/api/v1/dashboard/logout", (c) => {
+    if (dashboard) c.header("set-cookie", clearCookie(dashboard));
+    return c.json({ ok: true });
+  });
+
+  app.get("/api/v1/dashboard/me", (c) => {
+    const actor = authenticateOperator(c);
+    // modelOverride gaat mee zodat het dashboard een veld kan uitzetten in plaats van te laten falen.
+    return actor ? c.json({ actor, modelOverride: modelOverride ?? null }) : c.json({ error: "unauthorized" }, 401);
+  });
+
+  /**
+   * Alle sites in één lijst. Dit kan niet via `withTenant`: de runtime-rol ziet per beleid alleen de
+   * eigen site, en dat is de bedoeling. Daarom een smalle SECURITY DEFINER-functie die precies deze
+   * velden teruggeeft — geen blanket-bypass, geen extra rechten op de tabellen.
+   */
+  app.get("/api/v1/dashboard/sites", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+    const { rows } = await db.query<{
+      id: string;
+      name: string;
+      public_key: string;
+      created_at: Date;
+      domains: string[];
+      lead_count: string;
+      conversation_count: string;
+    }>("SELECT * FROM dashboard_list_sites()");
+    return c.json({
+      sites: rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        publicKey: r.public_key,
+        domains: r.domains ?? [],
+        createdAt: r.created_at.toISOString(),
+        leadCount: Number(r.lead_count),
+        conversationCount: Number(r.conversation_count),
+      })),
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Beheer (tijdelijk): sites aanmaken en instellen
   // ---------------------------------------------------------------------------
   app.post("/api/v1/admin/sites", async (c) => {
-    const actor = authenticateAdmin(c);
+    const actor = authenticateOperator(c);
     if (!actor) return c.json({ error: "unauthorized" }, 401);
 
     const parsed = createSiteInput.safeParse(await readJson(c));
@@ -420,7 +521,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/v1/admin/sites/:id", async (c) => {
-    if (!authenticateAdmin(c)) return c.json({ error: "unauthorized" }, 401);
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
 
     const state = await readSiteState(db, c.req.param("id"));
     if (!state) return c.json({ error: "not_found" }, 404);
@@ -428,7 +529,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.patch("/api/v1/admin/sites/:id", async (c) => {
-    const actor = authenticateAdmin(c);
+    const actor = authenticateOperator(c);
     if (!actor) return c.json({ error: "unauthorized" }, 401);
 
     const parsed = updateSiteSettingsInput.safeParse(await readJson(c));
@@ -442,7 +543,7 @@ export function createApp(deps: AppDeps): Hono {
   // Beheer: leads van deze site. Een lead die niemand leest is geen lead.
   // ---------------------------------------------------------------------------
   app.get("/api/v1/admin/sites/:id/leads", async (c) => {
-    if (!authenticateAdmin(c)) return c.json({ error: "unauthorized" }, 401);
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
 
     const parsed = leadsQuery.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
@@ -475,7 +576,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.get("/api/v1/admin/sites/:id/history", async (c) => {
-    if (!authenticateAdmin(c)) return c.json({ error: "unauthorized" }, 401);
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
 
     const parsed = siteSettingsHistoryQuery.safeParse(c.req.query());
     if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
@@ -498,7 +599,7 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   app.post("/api/v1/admin/sites/:id/history/:historyId/restore", async (c) => {
-    const actor = authenticateAdmin(c);
+    const actor = authenticateOperator(c);
     if (!actor) return c.json({ error: "unauthorized" }, 401);
 
     const siteId = c.req.param("id");
@@ -798,6 +899,13 @@ export function createApp(deps: AppDeps): Hono {
 
     return c.json({ leadId: result.leadId, created: result.created }, result.created ? 201 : 200);
   });
+
+  // Het dashboard uit dezelfde origin serveren als de API. Dat is geen detail: de sessiecookie is
+  // SameSite=Lax, dus een losse dashboard-origin zou CORS met credentials vereisen en de cookie
+  // alsnog op de verkeerde origin zetten. Zonder staticDir (tests) bestaat deze mount niet.
+  if (staticDir) {
+    app.use("/*", serveStatic({ root: staticDir }));
+  }
 
   return app;
 }

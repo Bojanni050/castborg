@@ -227,3 +227,41 @@ deze aanpak), Actions (wat is gewijzigd).
 - Validatie: API 85/85, typecheck schoon. Kwaliteitsronde drie keer gedraaid en vergeleken; de vier problemen zijn weg,
   met als restpunten dat de assistent het aanbod soms herhaalt en dat hij zonder bedrijfsinformatie niets zinnigs over
   de diensten kan zeggen.
+
+## 2026-10-30 (Dashboard: van curl naar een scherm)
+
+- Findings: een prompt wijzigen kon alleen met `PATCH` en een bearer-token. Dat is precies de bottleneck: de
+  kwaliteitsronde liet zien dat elke site een prompt met echte bedrijfsinformatie nodig heeft, en niemand onderhoudt
+  dat met curl. Tweede probleem: een lijst over alle sites is onder tenant-RLS principieel onmogelijk — de runtime-rol
+  ziet alleen de eigen rij, en dat is ook de bedoeling.
+- Conclusions: één operator-wachtwoord in plaats van een `users`-tabel. Er is één gebruiker, `site_settings_history`
+  accepteert al `actor_type='user'`, en een tabel met één rij is schijn-authenticatie. `dashboard-auth.ts` is de naad
+  waar die tabel later komt; nu kost het geen migratie.
+- Conclusions: de dashboardcookie is een ondertekende token naast de bestaande bearer, geen tweede routelaag. Daardoor
+  werken alle `/admin/…`-routes ongewijzigd en blijft de historie kloppend: via het scherm `user · <naam>`, via een
+  script `admin_token · <naam>`.
+- Conclusions: eigen `typ`-claim in de payload. De widget en het dashboard gebruiken hetzelfde HMAC-geheim en bijna
+  dezelfde code; zonder die claim is een widgettoken een dashboardtoken. Liever een veld te veel dan een token dat
+  per ongeluk in de verkeerde hoek werkt.
+- Conclusions: het dashboard en de API delen bewust één origin (`serveStatic` op `/`). Een cookie met `SameSite=Lax`
+  werkt dan zonder CORS-uitzonderingen, en `COOKIE_SECURE=true` is een env-flag zodra er https voor staat.
+- Conclusions: de cross-tenant lijst krijgt één smalle `SECURITY DEFINER`-functie in plaats van een tweede rol of een
+  bypass. Zelfde patroon als `resolve_site_by_public_key`: alleen wat de lijst nodig heeft, niets meer. Fail-closed:
+  is de migrator geen superuser, dan is de lijst leeg en lekt hij niets.
+- Bug van mezelf: de overzichtstest verwachtte precies twee sites, maar tests in hetzelfde bestand maken al sites aan
+  en de database wordt gedeeld. Opgelost met een `truncateSites()`-helper in plaats van een lossere assertie.
+- Actions:
+  - `packages/api/src/dashboard-auth.ts` (nieuw): cookie, HMAC-token met `typ`, wachtwoordvergelijking via sha256 +
+    `timingSafeEqual` (lengte lekt niet).
+  - `packages/api/src/app.ts`: `dashboard/login|logout|me|sites`, `authenticateOperator` (bearer óf cookie),
+    `dashboardLogin`-limiter, `serveStatic` als `staticDir` bestaat, `modelOverride` in de responses.
+  - `packages/api/src/server.ts`: `DASHBOARD_PASSWORD` (min 12), `DASHBOARD_ACTOR`, `COOKIE_SECURE`, `staticDir`.
+  - `packages/api/migrations/0006_dashboard.sql` (nieuw): `dashboard_list_sites()`.
+  - `packages/dashboard/` (nieuw package): inloggen, sitelijst, detail met prompt, grenzen, widget, leads en historie
+    met terugzetten. Alleen gewijzigde velden gaan mee in de PATCH, anders schrijft elke opslag een lege historieregel.
+  - `packages/api/test/dashboard.test.ts` (nieuw, 14 tests), `packages/shared/src/index.ts`: `dashboardLoginInput`.
+  - `.env.example`, `README.md`.
+- Validatie: API **99/99** (was 85), typecheck schoon op api/dashboard, dashboardbuild 29 kB (10,6 kB gzip). In de
+  browser: ingelogd, site aangemaakt, prompt geplakt en opgeslagen, historie toonde `user · bojan` met leesbare diff.
+  Daarna één echte Mistral-beurt met de via het scherm gezette prompt: het antwoord gebruikte de tekst uit die prompt,
+  dus de keten scherm → database → provider is rond.

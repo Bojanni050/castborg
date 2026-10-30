@@ -8,7 +8,7 @@ TypeScript-monorepo (pnpm). Doel van deze stap: tenant-isolatie vastleggen en be
 packages/
   shared/      Zod-schema's en types, gedeeld door api, dashboard en widget
   api/         Backend (Hono), migraties, tenant-helper, isolatietests
-  dashboard/   React + Vite (nog leeg)
+  dashboard/   Preact + Vite: inloggen, sites beheren, prompt en grenzen, leads en historie
   widget/      Preact + Shadow DOM, embedbaar chatvenster met streaming
 ```
 
@@ -19,12 +19,14 @@ zelf (`--env-file`), je hoeft niets te exporteren.
 
 ```bash
 corepack pnpm install
-cp .env.example .env     # vul APP_DB_PASSWORD, SESSION_SECRET (openssl rand -hex 32), ADMIN_TOKEN en de prijzen in
+cp .env.example .env     # vul APP_DB_PASSWORD, SESSION_SECRET (openssl rand -hex 32), ADMIN_TOKEN, DASHBOARD_PASSWORD en de prijzen in
 corepack pnpm db:up      # Postgres 16 via Docker op 127.0.0.1:5435
 corepack pnpm db:migrate # voert packages/api/migrations/*.sql uit en zet het wachtwoord van ailead_app
 corepack pnpm test       # isolatie-, API-, streaming- en instellingentests tegen de echte database
 corepack pnpm --filter @ai-lead/api dev
-corepack pnpm --filter @ai-lead/widget dev   # testpagina op 127.0.0.1:5173
+corepack pnpm --filter @ai-lead/widget dev      # testpagina op 127.0.0.1:5173
+corepack pnpm --filter @ai-lead/dashboard build # dashboard/dist; de API serveert dat op /
+corepack pnpm --filter @ai-lead/dashboard dev   # of dev-server op 127.0.0.1:5174, proxyt /api
 ```
 
 Poort 5435 en niet 5432: op deze machine draait al een native Postgres op 5432 (en `chronicle-db`
@@ -38,6 +40,10 @@ zet het bij elke run. Zonder `APP_DB_PASSWORD` stopt hij met een melding in plaa
 
 | Route | Auth | Doel |
 |---|---|---|
+| `POST /api/v1/dashboard/login` | wachtwoord in de body | Zet de dashboardcookie (8 uur); `503 not_configured` zonder `DASHBOARD_PASSWORD`, `429` na 10 pogingen per kwartier |
+| `POST /api/v1/dashboard/logout` | cookie | Wist de cookie |
+| `GET /api/v1/dashboard/me` | cookie | Wie ben ik, en is `MISTRAL_MODEL` actief |
+| `GET /api/v1/dashboard/sites` | cookie | Alle sites met domeinen, aantal leads en gesprekken (cross-tenant via één smalle `SECURITY DEFINER`-functie) |
 | `POST /api/v1/admin/sites` | `Bearer ADMIN_TOKEN` (tijdelijk) | Site + domeinen + instellingen aanmaken, geeft `pk_…` terug |
 | `GET /api/v1/admin/sites/:id` | `Bearer ADMIN_TOKEN` | Huidige toestand inclusief instellingen |
 | `PATCH /api/v1/admin/sites/:id` | `Bearer ADMIN_TOKEN` | Instellingen wijzigen; `domains` vervangt de hele lijst, onbekende velden geven `400` |
@@ -49,6 +55,10 @@ zet het bij elke run. Zonder `APP_DB_PASSWORD` stopt hij met een melding in plaa
 | `POST /api/v1/conversations/:id/messages/stream` | `Bearer <sessietoken>` | Zelfde, maar als SSE: `delta` `{text}` … daarna `done` `{messageId}` of `error` `{error, requestId}` |
 | `POST /api/v1/conversations/:id/lead` | `Bearer <sessietoken>` | Contactgegevens van de bezoeker; `201` bij nieuw, `200` bij overschrijven, minstens e-mail of telefoon |
 | `GET /api/v1/admin/sites/:id/leads?limit=50` | `Bearer ADMIN_TOKEN` | Ingekomen leads, nieuwste eerst |
+
+Alle `/admin/…`-routes accepteren naast `Bearer ADMIN_TOKEN` ook de dashboardcookie, zodat het dashboard geen tweede
+soort client is. Wat de historie als actor vastlegt verschilt dan: `admin_token` met de naam van het token, of `user` met
+`DASHBOARD_ACTOR`.
 
 Foutcodes voor de widget: `401` token ongeldig, `429` rate limit of gesprekslimiet, `503 budget_exceeded` (dagbudget van de site op),
 `502 provider_unavailable` (alleen niet-streaming; bij streaming komt dit als `error`-event, omdat de stream dan al open is).
@@ -164,6 +174,32 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
 - Meerdere beheerders zonder dashboard-auth: zet `ADMIN_TOKENS="naam:token,naam2:token2"` in plaats van `ADMIN_TOKEN`.
   De naam komt in de historie terecht. Dit is een benoemde sleutel, geen authenticatie: iedereen met een token is die naam.
 
+## Dashboard
+
+`/` serveert het dashboard als `packages/dashboard/dist` bestaat (`corepack pnpm --filter @ai-lead/dashboard build`).
+In dev gebruik je `pnpm --filter @ai-lead/dashboard dev` op 127.0.0.1:5174; Vite proxyt `/api` naar de API, dus je
+werkt tegen dezelfde database en cookies.
+
+- **Inloggen** met `DASHBOARD_PASSWORD` (minimaal 12 tekens). Eén operator, geen gebruikersbeheer: er is één wachtwoord
+  en `DASHBOARD_ACTOR` bepaalt welke naam in de historie komt. Zodra er meerdere mensen of klanten moeten inloggen is dat
+  de plek waar een `users`-tabel met wachtwoordhash per rij komt.
+- **De sessie is een ondertekende cookie** (`ai_lead_dashboard`, HMAC met `SESSION_SECRET`), 8 uur geldig, `HttpOnly` en
+  `SameSite=Lax`. Uitloggen wist de cookie maar trekt hem niet in: een gekopieerde cookie blijft tot het verlopen werkt.
+  Echte intrekking vraagt een sessietabel met sessie-ids.
+- **Het dashboard en de API delen een origin**, daarom kan de cookie `SameSite=Lax` blijven en is er geen CORS. Zet
+  `COOKIE_SECURE=true` zodra er https voor staat.
+- **Dezelfde routes, twee auth-wegen**: `GET/PATCH /admin/sites…` accepteert een bearer-token uit `ADMIN_TOKENS` óf de
+  dashboardcookie. Een wijziging via het dashboard schrijft `actor_type='user'` met de operatornaam, een script met een
+  token schrijft `admin_token`. Zo blijft de historie kloppend zonder twee aparte routes.
+- **De sitelijst is cross-tenant**, en dat kan niet met de runtime-rol. Daarvoor bestaat één smalle `SECURITY DEFINER`-functie
+  `dashboard_list_sites()` (naam, sleutel, domeinen, aantallen leads en gesprekken). Geen blanket-bypass en geen extra
+  tabelrechten. Let op: die functie werkt alleen als de rol in `DATABASE_URL_MIGRATOR` superuser of `BYPASSRLS` is —
+  draait de applicatie ooit zonder die rol, dan zie je een lege lijst in plaats van andermans data.
+- **Het modelveld is uitgeschakeld** zolang `MISTRAL_MODEL` actief is, met de uitleg erbij in plaats van een 409 waar je
+  niets aan hebt.
+- De dashboardcookies zijn van hetzelfde type HMAC als de widget-sessietokens, maar met een eigen `typ`-claim. Een
+  widgettoken in de dashboardcookie wordt geweigerd (en andersom).
+
 ## Kwaliteitsronde (meten in plaats van voelen)
 
 `packages/api/scripts/kwaliteit.mjs` stuurt een vaste set gesprekken door de echte assistent en schrijft een
@@ -210,8 +246,9 @@ Twee dingen die daaruit te leren zijn en die niet met prompttekst op te lossen z
 
 ## Bewust nog niet gedaan
 
-- `users`, `site_memberships` en dashboard-auth (fase 1). Daarbij hoort ook een beheerpad dat over sites heen mag lezen
-  (site-overzicht): dat kan niet via de runtime-rol met tenant-RLS en vraagt om een eigen policy of rol.
+- Echte authenticatie met `users`, `site_memberships` en een wachtwoordhash per persoon. Er is nu één operator-wachtwoord
+  met een ondertekende cookie; dat is de eerlijke tussenstap, niet het einddoel. Zodra twee mensen of twee klanten inloggen
+  moet elke wijziging aan een individu te koppelen zijn, en moet een uitgelekte cookie ingetrokken kunnen worden.
 - `site_settings.provider` bestaat al, maar de API gebruikt nu één globale provider (`PROVIDER` in `.env`). Per-site-keuze komt wanneer er een tweede provider is.
 - Dashboardoverzicht van kosten en gebruik (de gegevens staan al in `usage_events`, met `request_id` per beurt en
   `status` `ok`/`error`/`aborted`; een dashboard moet `error` niet als gratis succes tellen).
