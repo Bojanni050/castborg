@@ -1,0 +1,43 @@
+# Productie: Postgres en de API in containers, de database zonder gepubliceerde poort.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml run --rm api pnpm --filter @ai-lead/api migrate
+#
+# De database-URL's worden hier overschreven zodat ze naar de `db`-service wijzen; in .env staan de
+# lokale adressen (127.0.0.1:5435) en die kloppen binnen een container niet.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?zet POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ailead
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ailead"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8787
+      DATABASE_URL_MIGRATOR: postgres://postgres:${POSTGRES_PASSWORD}@db:5432/ailead
+      DATABASE_URL_APP: postgres://ailead_app:${APP_DB_PASSWORD}@db:5432/ailead
+    depends_on:
+      db:
+        condition: service_healthy
+    # Alleen op loopback: Caddy of nginx op de host doet https ervoor. Nooit rechtstreeks openzetten,
+    # dan gaat het dashboardwachtwoord onversleuteld over de lijn.
+    ports:
+      - "127.0.0.1:8787:8787"
+
+volumes:
+  dbdata:

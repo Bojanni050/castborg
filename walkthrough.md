@@ -308,3 +308,39 @@ deze aanpak), Actions (wat is gewijzigd).
   testsite `Opruimtest`: gesprek verwijderen (2 berichten weg, lead blijft, log 1 rij), lead verwijderen, "Nu
   opruimen" met 0 treffers omdat alles recent is maar met twee nieuwe logregels. Screenshots `retention-1.png`,
   `retention-2.png`.
+
+## 2026-10-30 (Uitrollen: één image voor API, dashboard en widget)
+
+- Findings: er was geen deployment. De API luisterde expliciet op `127.0.0.1`, wat in een container
+  betekent dat niemand hem kan bereiken, en `widget.js` had geen plek om te wonen: een klantsite zou
+  de bundel zelf moeten hosten, terwijl de widget juist moet praten met de API-origin.
+- Conclusions: één image met alles erin. De widget wordt tijdens de build gecompileerd en door de API
+  op `/widget.js` geserveerd, zodat een klantsite één adres hoeft te kennen en `data-api-base` niet
+  nodig is. Bewust niet via `serveStatic`: dat zet geen eigen headers, en de bundel is één bestand van
+  ~33 kB — een `readFile` met een `cache-control` is eerder eerlijk dan een omweg om hetzelfde te doen.
+- Conclusions: `HOST` als variabele in plaats van een hardgecodeerd adres. Lokaal blijft het
+  `127.0.0.1` (dev hoort niet per ongeluk open te staan), in de container `0.0.0.0`, en de poort wordt
+  alsnog alleen op loopback gepubliceerd zodat een reverse proxy het enige is dat van buiten bereikbaar is.
+- Conclusions: `--env-file` werd `--env-file-if-exists`. In een container komen de variabelen van
+  Docker en bestaat `/app/.env` niet; de oude vlag liet de app dan crashen nog voor hij begon.
+- Bug gevonden bij de eerste build: `pnpm install --frozen-lockfile` installeerde alleen de root, omdat
+  `pnpm-workspace.yaml` nog niet in de image stond. Elke package miste zijn eigen `node_modules`
+  (`vite: not found`). Opgelost door dat bestand bij de manifesten te kopiëren. Het is een valkuil die
+  je maar één keer maakt: pnpm klaagt niet, hij installeert gewoon minder dan je denkt.
+- Actions:
+  - `Dockerfile` (multi-stage, node:24-alpine, dashboard en widget gebouwd in de build-stage),
+    `.dockerignore`, `docker-compose.prod.yml` (db zonder gepubliceerde poort, api op
+    `127.0.0.1:8787`, database-URL's naar de `db`-service).
+  - `packages/api/src/server.ts`: `HOST`, `widgetDir`, waarschuwingen `widget_build_missing` en
+    `public_without_secure_cookie`.
+  - `packages/api/src/app.ts`: `widgetDir` in `AppDeps` en `GET /widget.js` met `cache-control`.
+  - `packages/api/package.json`: `--env-file-if-exists` in alle vier de scripts.
+  - `packages/api/test/api.test.ts`: twee tests (serveren met de juiste headers, 404 zonder map).
+  - `.env.example`: `HOST` en `POSTGRES_PASSWORD` (alleen voor de prod-compose).
+  - `README.md`: sectie "Uitrollen (Docker)" met de commando's, de cronregel, de vier dingen die stil
+    misgaan (COOKIE_SECURE, X-Forwarded-For, migrator moet BYPASSRLS houden, widgetdist in de image) en
+    het inbedblok voor een klantsite.
+- Validatie: image gebouwd en gedraaid tegen de dev-database; `/` serveert het dashboard (455 B html),
+  `/widget.js` 33.706 B met `cache-control: public, max-age=300`, `/api/v1/health` 200, inloggen 200,
+  `pnpm migrate` in de container geeft "Niets te doen", en in de browser op de container-origin laadt
+  `/widget.js`, opent de launcher en komt er een (stub-)antwoord terug. Tests 112/112, typecheck schoon.

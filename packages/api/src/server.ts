@@ -90,6 +90,13 @@ const dashboard = dashboardPassword
 const staticDirUrl = new URL("../../dashboard/dist", import.meta.url);
 const staticDir = existsSync(fileURLToPath(staticDirUrl)) ? fileURLToPath(staticDirUrl) : undefined;
 
+/**
+ * De gebouwde widget, als die er is. Vanaf hier serveert de API `/widget.js`, zodat een klantsite
+ * maar één adres hoeft te kennen en de widget automatisch met de juiste API praat.
+ */
+const widgetDirUrl = new URL("../../widget/dist", import.meta.url);
+const widgetDir = existsSync(fileURLToPath(widgetDirUrl)) ? fileURLToPath(widgetDirUrl) : undefined;
+
 const providerName = process.env.PROVIDER ?? "mistral";
 let provider: AiProvider;
 let pricing: Pricing;
@@ -121,6 +128,7 @@ const app = createApp({
   adminTokens: adminTokens(),
   dashboard,
   staticDir,
+  widgetDir,
   provider,
   pricing,
   maxOutputTokens,
@@ -129,8 +137,23 @@ const app = createApp({
 });
 
 const port = Number(process.env.PORT ?? 8787);
-serve({ fetch: app.fetch, port, hostname: "127.0.0.1" }, () => {
-  console.log(`API luistert op http://127.0.0.1:${port} (provider: ${provider.name})`);
+/**
+ * Standaard alleen loopback: lokaal ontwikkelen hoort niet per ongeluk open te staan. In een container
+ * moet het 0.0.0.0 zijn, anders is de API van buiten de container onbereikbaar.
+ */
+const hostname = process.env.HOST?.trim() || "127.0.0.1";
+serve({ fetch: app.fetch, port, hostname }, () => {
+  console.log(`API luistert op http://${hostname}:${port} (provider: ${provider.name})`);
+  if (hostname === "0.0.0.0" && !process.env.COOKIE_SECURE) {
+    logEvent("warn", "public_without_secure_cookie", {
+      note: "De API luistert op alle interfaces zonder COOKIE_SECURE=true. Zet https voor de API, anders gaat het dashboardcookie onversleuteld over de lijn.",
+    });
+  }
+  if (!widgetDir) {
+    logEvent("warn", "widget_build_missing", {
+      note: "Geen packages/widget/dist: /widget.js bestaat niet. Bouw hem met corepack pnpm --filter @ai-lead/widget build.",
+    });
+  }
   if (modelOverride) {
     logEvent("warn", "model_override_active", {
       model: modelOverride,

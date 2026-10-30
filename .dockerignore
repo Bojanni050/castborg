@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+**/dist
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+*.log
+walkthrough.md
+README.md
+packages/api/test
+**/*.test.ts
+**/coverage

@@ -1,4 +1,6 @@
 import { randomInt, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { PoolClient } from "pg";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import { serveStatic } from "@hono/node-server/serve-static";
@@ -59,6 +61,8 @@ export interface AppDeps {
   dashboard?: DashboardAuthConfig;
   /** Map met de gebouwde dashboard-app. Leeg in tests; in productie zet de server hier een pad neer. */
   staticDir?: string;
+  /** Map met de gebouwde widget (widget.js). Zonder deze map bestaat de route niet. */
+  widgetDir?: string;
   provider: AiProvider;
   pricing: Pricing;
   /** Bovengrens per antwoord; dezelfde waarde als de provider gebruikt, anders rekent het budget scheef. */
@@ -237,6 +241,7 @@ export function createApp(deps: AppDeps): Hono {
     adminTokens,
     dashboard,
     staticDir,
+    widgetDir,
     provider,
     pricing,
     maxOutputTokens,
@@ -1045,6 +1050,26 @@ export function createApp(deps: AppDeps): Hono {
 
     return c.json({ leadId: result.leadId, created: result.created }, result.created ? 201 : 200);
   });
+
+  // De widget vanaf dezelfde origin als de API. Een klantsite hoeft dan maar één adres te kennen
+  // (`<script src="https://api.example.com/widget.js" data-site-key="pk_...">`) en de widget praat
+  // standaard met de origin waar hij vandaan komt. Kort gecached: bij een nieuwe versie pakt de
+  // browser hem binnen vijf minuten, en `?v=...` aan de URL dwingt het meteen af.
+  //
+  // Bewust niet via serveStatic: dat zet geen eigen headers en de bundel is één bestand van ~30 kB.
+  if (widgetDir) {
+    const widgetFile = join(widgetDir, "widget.js");
+    app.get("/widget.js", async (c) => {
+      try {
+        const body = await readFile(widgetFile, "utf8");
+        c.header("content-type", "text/javascript; charset=utf-8");
+        c.header("cache-control", "public, max-age=300");
+        return c.body(body);
+      } catch {
+        return c.notFound();
+      }
+    });
+  }
 
   // Het dashboard uit dezelfde origin serveren als de API. Dat is geen detail: de sessiecookie is
   // SameSite=Lax, dus een losse dashboard-origin zou CORS met credentials vereisen en de cookie

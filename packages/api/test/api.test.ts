@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { createApp, normalizeDomain } from "../src/app.js";
@@ -252,5 +255,34 @@ describe("db-rechten van de runtime-rol", () => {
     await expect(db.query("CREATE TABLE hack (id int)")).rejects.toThrow();
     await expect(db.query("DROP TABLE leads")).rejects.toThrow();
     await expect(withTenant(db, "00000000-0000-0000-0000-000000000000", (q) => q.query("TRUNCATE leads"))).rejects.toThrow();
+  });
+});
+
+describe("widget serveren", () => {
+  it("serveert /widget.js uit de widgetmap, met een korte cache", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ai-lead-widget-"));
+    writeFileSync(join(dir, "widget.js"), "window.AiLeadWidget = {};\n");
+
+    const app = createApp({
+      db,
+      sessionSecret: SECRET,
+      adminTokens: [{ name: "test", token: ADMIN }],
+      provider,
+      pricing: { inputEurPerMTok: 0, outputEurPerMTok: 0 },
+      maxOutputTokens: 800,
+      widgetDir: dir,
+    });
+
+    const res = await app.request("/widget.js");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("javascript");
+    // Vijf minuten: een nieuwe versie landt vanzelf, en `?v=...` dwingt het meteen af.
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(await res.text()).toContain("AiLeadWidget");
+  });
+
+  it("bestaat niet zonder widgetmap", async () => {
+    const res = await makeApp().request("/widget.js");
+    expect(res.status).toBe(404);
   });
 });

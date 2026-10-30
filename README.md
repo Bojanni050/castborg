@@ -36,6 +36,54 @@ op 5434). Pas `docker-compose.yml` en de URL's in `.env` samen aan als je een an
 runtime-rol `ailead_app` staat niet in een migratie (die is immers in te zien); de migratierunner
 zet het bij elke run. Zonder `APP_DB_PASSWORD` stopt hij met een melding in plaats van door te gaan.
 
+## Uitrollen (Docker)
+
+Eén image bevat alles: de API, het gebouwde dashboard (op `/`) en de widget (op `/widget.js`). Een
+klantsite heeft daardoor maar één adres nodig.
+
+```bash
+# eenmalig, in .env: POSTGRES_PASSWORD vullen, COOKIE_SECURE=true, prijzen en sleutels
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml run --rm api pnpm --filter @ai-lead/api migrate
+```
+
+De `db`-service publiceert geen poort; de API alleen op `127.0.0.1:8787`, zodat https-proxy op de
+host het enige is dat van buiten bereikbaar is. De compose-file overschrijft `DATABASE_URL_APP` en
+`DATABASE_URL_MIGRATOR` zodat ze naar de `db`-service wijzen — de waarden in `.env` gelden voor
+lokaal (poort 5435) en kloppen in een container niet.
+
+Opruimen volgens de bewaartermijnen hoort in de cron van de host, niet in de container:
+
+```
+15 3 * * * cd /srv/castborg && docker compose -f docker-compose.prod.yml run --rm api pnpm retention >> /var/log/castborg-retention.log 2>&1
+```
+
+Wat je bij het uitrollen moet controleren, want het gaat stil mis:
+
+- **`COOKIE_SECURE=true`** achter https. Zonder https logt de browser zichzelf niet meer in, met https
+  maar zonder deze vlag gaat het cookie onversleuteld over de lijn. De server waarschuwt bij het
+  starten als hij op `0.0.0.0` luistert zonder deze vlag.
+- **`X-Forwarded-For`** moet door de proxy gezet worden. Zonder die header ziet de rate limiter
+  iedereen als één bezoeker.
+- **De migrator-rol moet superuser of `BYPASSRLS` zijn**, anders geeft `dashboard_list_sites()` leeg
+  terug en zie je geen sites in het dashboard. Dat is fail-closed, geen fout.
+- **`/widget.js`** wordt alleen geserveerd als `packages/widget/dist` in de image zit. In de
+  Dockerfile wordt hij gebouwd; bij een eigen build moet je dat zelf doen.
+
+Een klantsite plakt dit in de pagina:
+
+```html
+<script src="https://api.example.com/widget.js" data-site-key="pk_..." async></script>
+```
+
+`data-api-base` hoeft er niet bij: de widget praat standaard met de origin waar het script vandaan
+komt. Wil je dat overschrijven, dan kan dat met `data-api-base="https://api.example.com"`.
+
+De image draait TypeScript via `tsx`, net als lokaal; er is dus geen gecompileerde `dist`. Dat kost
+opstarttijd en een paar tientallen MB in het image, en het scheelt een tweede uitvoerpad om te
+onderhouden. Zodra opstarttijd of imagegrootte een probleem wordt, is `tsc` naar `dist` de volgende
+stap.
+
 ## API (v1)
 
 | Route | Auth | Doel |
@@ -141,10 +189,13 @@ bekend zijn, anders weigert de API met `origin_not_allowed`. Maak lokaal dus een
 Inbedden op een echte site:
 
 ```html
-<script src="/widget.js" data-site-key="pk_…" data-api-base="https://api.example.nl" async></script>
+<script src="https://api.example.nl/widget.js" data-site-key="pk_…" async></script>
 ```
 
-Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
+De API serveert `/widget.js` zelf (`packages/widget/dist`), dus je hoeft de bundel nergens anders
+neer te zetten. Zonder `data-api-base` gebruikt de widget de origin van het script zelf — en dat is
+dan meteen de juiste API. `data-api-base` is er alleen voor het geval de bundel ergens anders vandaan
+komt, bijvoorbeeld een CDN.
 
 - **Streamen** gaat met `fetch` + `ReadableStream`, niet met `EventSource`: die kan geen POST met
   een bearer-token. De parser is stateful en overleeft een chunkgrens midden in `\r\n`.
