@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ai-lead widget — testpagina</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        color: #0f172a;
+        background: #f8fafc;
+      }
+      main { max-width: 720px; margin: 0 auto; padding: 48px 24px 160px; }
+      h1 { font-size: 28px; margin: 0 0 8px; }
+      h2 { font-size: 18px; margin-top: 32px; }
+      p, li { line-height: 1.6; color: #475569; }
+      code { background: #e2e8f0; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+      pre { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 12px; overflow-x: auto; font-size: 13px; }
+      .note { border-left: 3px solid #2563eb; padding-left: 16px; }
+      .missing { background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412;
+        padding: 16px; border-radius: 12px; margin-top: 24px; }
+      .spacer { height: 60vh; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Testpagina</h1>
+      <p>
+        Deze pagina laadt de widget zoals een klant dat zou doen. De site-key komt uit de URL, dus je
+        hoeft niets te bewerken:
+      </p>
+      <pre><code>http://127.0.0.1:5173/?key=pk_...</code></pre>
+
+      <p class="note">
+        Het domein van deze pagina moet bij de site bekend zijn, anders geeft de API
+        <code>origin_not_allowed</code>. Lokaal is dat <code>127.0.0.1</code> of <code>localhost</code>.
+        Maak de site dus aan met een van die twee als domein. Draait de API ergens anders, voeg dan
+        <code>&amp;api=http://host:poort</code> toe.
+      </p>
+
+      <h2>Wat je hier kunt testen</h2>
+      <ul>
+        <li>Streamend antwoord: de tekst moet stukje voor stukje verschijnen.</li>
+        <li>Enter verstuurt, Shift+Enter geeft een nieuwe regel.</li>
+        <li>Sluiten en heropenen: het gesprek en de zichtbare historie blijven (sessionStorage).</li>
+        <li>Herladen: de historie komt terug zolang het sessietoken geldig is (2 uur).</li>
+        <li>Budget op: zet <code>daily_budget_eur</code> laag en je krijgt een melding, geen crash.</li>
+        <li>Console: de widget logt integratiefouten met het voorvoegsel <code>[ai-lead]</code>.</li>
+      </ul>
+
+      <div id="missing-key" class="missing" hidden>
+        Geen <code>?key=pk_...</code> in de URL. Open deze pagina met een site-key, bijvoorbeeld
+        <code>/?key=pk_abcdefghijklmnopqrstuvwx</code>.
+      </div>
+
+      <div class="spacer"></div>
+      <p>Scroll naar beneden om te zien dat de widget bovenop de pagina blijft staan.</p>
+    </main>
+
+    <script>
+      // De widget wordt pas geladen als er een key is, zodat de pagina zonder key geen dode knop toont.
+      (function () {
+        var params = new URLSearchParams(location.search);
+        var key = params.get("key");
+        if (!key) {
+          document.getElementById("missing-key").hidden = false;
+          return;
+        }
+
+        var script = document.createElement("script");
+        script.type = "module";
+        script.src = "/src/embed.tsx";
+        script.dataset.siteKey = key;
+        script.dataset.apiBase = params.get("api") || "http://127.0.0.1:8787";
+        document.body.appendChild(script);
+      })();
+    </script>
+  </body>
+</html>
