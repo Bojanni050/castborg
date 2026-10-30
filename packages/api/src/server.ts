@@ -51,8 +51,10 @@ let provider: AiProvider;
 let pricing: Pricing;
 
 if (providerName === "stub") {
-  // Alleen voor lokale ontwikkeling.
-  provider = new StubProvider();
+  // Alleen voor lokale ontwikkeling. STUB_STREAM_DELAY_MS maakt het streamen zichtbaar in de widget.
+  const stubDelay = process.env.STUB_STREAM_DELAY_MS ? Number(process.env.STUB_STREAM_DELAY_MS) : 0;
+  if (!Number.isInteger(stubDelay) || stubDelay < 0) fail("STUB_STREAM_DELAY_MS moet 0 of een positief geheel getal zijn");
+  provider = new StubProvider({ delayMs: stubDelay });
   pricing = { inputEurPerMTok: 0, outputEurPerMTok: 0 };
 } else if (providerName === "mistral") {
   provider = new MistralProvider({

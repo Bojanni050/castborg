@@ -66,6 +66,12 @@ export function estimateUsage(req: ProviderRequest, reply: string): Usage {
 /** Deterministische stub voor ontwikkeling en tests, zonder externe API. */
 export class StubProvider implements AiProvider {
   readonly name = "stub";
+  private readonly streamDelayMs: number;
+
+  /** delayMs vertraagt elke delta, zodat je het streamen in de widget kunt zien zonder echte provider. */
+  constructor(opts: { delayMs?: number } = {}) {
+    this.streamDelayMs = opts.delayMs ?? 0;
+  }
 
   async complete(req: ProviderRequest): Promise<ProviderResponse> {
     const last = req.history[req.history.length - 1]?.content ?? "";
@@ -75,7 +81,10 @@ export class StubProvider implements AiProvider {
 
   async *stream(req: ProviderRequest): AsyncGenerator<StreamEvent> {
     const { text, usage } = await this.complete(req);
-    for (const word of text.split(/(?<= )/)) yield { type: "delta", text: word };
+    for (const word of text.split(/(?<= )/)) {
+      if (this.streamDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.streamDelayMs));
+      yield { type: "delta", text: word };
+    }
     yield { type: "done", usage };
   }
 }

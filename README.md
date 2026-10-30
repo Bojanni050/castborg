@@ -7,9 +7,9 @@ TypeScript-monorepo (pnpm). Doel van deze stap: tenant-isolatie vastleggen en be
 ```
 packages/
   shared/      Zod-schema's en types, gedeeld door api, dashboard en widget
-  api/         Backend (Hono komt in fase 1), migraties, tenant-helper, isolatietests
+  api/         Backend (Hono), migraties, tenant-helper, isolatietests
   dashboard/   React + Vite (nog leeg)
-  widget/      Preact + Shadow DOM (nog leeg)
+  widget/      Preact + Shadow DOM, embedbaar chatvenster met streaming
 ```
 
 ## Starten
@@ -24,6 +24,7 @@ corepack pnpm db:up      # Postgres 16 via Docker op 127.0.0.1:5435
 corepack pnpm db:migrate # voert packages/api/migrations/*.sql uit en zet het wachtwoord van ailead_app
 corepack pnpm test       # isolatie-, API-, streaming- en instellingentests tegen de echte database
 corepack pnpm --filter @ai-lead/api dev
+corepack pnpm --filter @ai-lead/widget dev   # testpagina op 127.0.0.1:5173
 ```
 
 Poort 5435 en niet 5432: op deze machine draait al een native Postgres op 5432 (en `chronicle-db`
@@ -76,6 +77,44 @@ inputvalidatie met Zod, AI-aanroep buiten de databasetransactie, en de Origin-co
 - Mislukte aanroepen worden ook geregistreerd (`status = 'error'`). Een client die tijdens het streamen wegvalt, breekt de aanvraag naar Mistral af; wat al getoond was blijft bewaard.
 - Privacy: bezoekersberichten en de systeemprompt gaan naar Mistral. Leg dat vast in de verwerkersafspraken en in de tekst bij de widget.
 
+## Widget
+
+`packages/widget` is een Preact-app in een Shadow DOM: de CSS van de klantsite kan niet naar binnen
+lekken en andersom. Er is geen los stylesheet; de stijl zit als string in de bundel.
+
+```bash
+corepack pnpm --filter @ai-lead/widget dev     # http://127.0.0.1:5173
+corepack pnpm --filter @ai-lead/widget test    # parser-, stijl- en sessietests
+corepack pnpm --filter @ai-lead/widget build   # dist/widget.js (IIFE, ~27 kB / ~11 kB gzip)
+```
+
+De testpagina leest de sleutel uit de URL: `http://127.0.0.1:5173/?key=pk_…` (optioneel
+`&api=http://host:poort` als de API ergens anders draait). Het domein van de pagina moet bij de site
+bekend zijn, anders weigert de API met `origin_not_allowed`. Maak lokaal dus een site aan met
+`127.0.0.1` en/of `localhost` als domein.
+
+Inbedden op een echte site:
+
+```html
+<script src="/widget.js" data-site-key="pk_…" data-api-base="https://api.example.nl" async></script>
+```
+
+Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
+
+- **Streamen** gaat met `fetch` + `ReadableStream`, niet met `EventSource`: die kan geen POST met
+  een bearer-token. De parser is stateful en overleeft een chunkgrens midden in `\r\n`.
+- **Historie** staat in `sessionStorage` (max 40 berichten) en overleeft een herlaadbeurt zolang het
+  sessietoken geldt (2 uur). De begroeting wordt alleen in de UI gezet; de API bewaart hem niet.
+- **De AI-melding** staat permanent in de header ("AI-assistent · antwoorden kunnen onjuist zijn");
+  dat is de transparantieverplichting, geen optie.
+- **Fouten** worden naar één Nederlandse regel vertaald (`budget_exceeded`, `rate_limited`, …).
+  Bij een configuratiefout mount de widget geen knop — een dode knop is erger dan geen knop — en
+  schrijft hij één gerichte waarschuwing met prefix `[ai-lead]` naar de console.
+- **Veiligheid**: de `pk_…`-sleutel is publiek en identificeert alleen de site. De autorisatie is het
+  sessietoken per gesprek. Antwoorden worden als platte tekst gerenderd (geen markdown of HTML).
+- `PROVIDER=stub` antwoordt direct; zet `STUB_STREAM_DELAY_MS=60` in `.env` om het streamen
+  zichtbaar te maken zonder echte provider.
+
 ## Instellingen en historie
 
 - Een nieuwe site krijgt meteen een bruikbare systeemprompt met de variabele `{{siteName}}`, die bij elke beurt
@@ -110,8 +149,8 @@ inputvalidatie met Zod, AI-aanroep buiten de databasetransactie, en de Origin-co
   `status` `ok`/`error`/`aborted`; een dashboard moet `error` niet als gratis succes tellen).
 - Logging is één JSON-regel per gebeurtenis op stderr (`src/log.ts`), zonder retentie of aggregatie. Bezoekertekst en
   systeemprompt worden bewust niet gelogd. Zet er een logverzamelaar achter voordat je naar productie gaat.
-- AI-melding in de widget ("je praat met een AI") en de verwerkersovereenkomst met Mistral. Beide horen bij de
-  transparantieplicht en de AVG, niet bij "later".
+- De AI-melding zit in de widget ("je praat met een AI"). Wat nog open is: de verwerkersovereenkomst met
+  Mistral en een bewaartermijn voor gesprekken. Beide horen bij de transparantieplicht en de AVG, niet bij "later".
 - Rate limiter is in geheugen: prima voor één instantie, vervangen zodra je meerdere draait.
 - `knowledge_*` (komt met fase 4).
 - Spamcheck/honeypot op het leadformulier en een leadroute (fase 3).

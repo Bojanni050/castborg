@@ -73,3 +73,35 @@ deze aanpak), Actions (wat is gewijzigd).
 - Findings: `corepack enable` faalt met EPERM op `C:\Program Files\nodejs` (geen schrijfrechten, en corepack probeert ook yarn neer te zetten). Daardoor werkten `pnpm test`, `pnpm typecheck` en `pnpm db:migrate` niet op deze machine, want die roepen intern `pnpm` aan.
 - Conclusions: geen PATH-gepriegel in de repo stoppen. De root-scripts roepen nu expliciet `corepack pnpm` aan, wat ook werkt als pnpm later wél op PATH staat. Eén woord per script, en het werkt op elke machine zonder setup.
 - Actions: `package.json` — `db:migrate`, `test` en `typecheck` gebruiken `corepack pnpm`; `corepack pnpm typecheck` draait groen op beide packages.
+
+## 2026-10-30 (Widget: Preact in een Shadow DOM)
+
+- Findings: na de budget- en instellingenfixes was er nog niets dat de slice zichtbaar maakte; een API die
+  correct streamt bewijst niet dat een bezoeker iets ziet. Bij het end-to-end proberen bleek bovendien dat de
+  stub alle delta's in één keer uitlevert, waardoor streamen in de browser niet te controleren viel.
+- Conclusions: Preact + Shadow DOM, omdat de widget in een vreemde pagina moet leven en de CSS van de klant
+  geen invloed mag hebben (en andersom). Geen los stylesheet: de CSS gaat als string mee in de bundel, dus
+  inbedden is één scripttag. Streamen met `fetch` + `ReadableStream` in plaats van `EventSource`, want die kan
+  geen POST met een bearer-token doen. Antwoorden worden als platte tekst gerenderd — geen markdown, geen HTML.
+  De AI-melding staat vast in de header en is niet instelbaar; dat is een verplichting, geen feature.
+- Conclusions: de begroeting wordt in de UI gezet en niet in de database, omdat de API hem nooit als bericht
+  heeft opgeslagen; twee bronnen voor dezelfde tekst lopen anders uit elkaar.
+- Conclusions: bij een configuratiefout mount de widget geen knop. Een dode knop is erger dan geen knop, en de
+  consolewaarschuwing met prefix `[ai-lead]` vertelt de integrator wat er mis is.
+- Conclusions: `STUB_STREAM_DELAY_MS` is toegevoegd zodat je het streamen kunt zien zonder Mistral-sleutel.
+  Zonder die vertraging is de stub te snel om iets te controleren.
+- Actions:
+  - `packages/widget/` (nieuw): `package.json`, `tsconfig.json`, `vite.config.ts`, `index.html`,
+    `src/{embed.tsx,api.ts,sse.ts,session.ts,styles.ts}`, `src/ui/App.tsx`,
+    `test/{sse,styles,session}.test.ts`.
+  - `packages/api/src/provider.ts`: `StubProvider` accepteert `{delayMs}` (veld `streamDelayMs`, omdat
+    `delayMs` al bestaat in de test-subklasse).
+  - `packages/api/src/server.ts`: `STUB_STREAM_DELAY_MS`.
+  - `.env.example`, `README.md`: widgetsectie, inbedvoorbeeld, AI-melding.
+  - `packages/api/test/support.ts`: laadt `.env`, zodat tests hetzelfde rolwachtwoord gebruiken als de app.
+- Gevonden tijdens het testen: tests riepen `migrate()` op dezelfde database en zetten daarmee het
+  wachtwoord van `ailead_app` op de testwaarde; elke testrun sloopte zo de dev-server (500 met
+  `password authentication failed`). Opgelost door de tests `.env` te laten lezen.
+- Validatie: `typecheck` schoon, widgettests 20/20, API-tests 69/69, build 27,36 kB (10,87 kB gzip).
+  In de browser gecontroleerd: launcher, paneel, begroeting, AI-melding, versturen, delta-voor-delta
+  renderen, historie na herladen. De stub antwoordt met `(stub) Je schreef: …`.
