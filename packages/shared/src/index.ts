@@ -91,3 +91,16 @@ export const leadInput = z.object({
   message: z.string().max(4000).optional(),
 });
 export type LeadInput = z.infer<typeof leadInput>;
+
+/**
+ * Wat de bezoeker zelf achterlaat. Minstens één contactweg, anders kan de sitehouder er niets mee.
+ * Lege velden horen weggelaten te worden door de client; de API doet dat ook nog eens zelf.
+ */
+export const submitLeadInput = leadInput
+  .strict()
+  .refine((v) => Boolean(v.email || v.phone), { message: "minstens e-mail of telefoon" });
+export type SubmitLeadInput = z.infer<typeof submitLeadInput>;
+
+export const leadsQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});

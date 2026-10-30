@@ -6,9 +6,13 @@ export interface ChatMessage {
   text: string;
 }
 
-interface StoredState {
+export interface StoredState {
   session: Session | null;
   messages: ChatMessage[];
+  /** Er is een lead achtergelaten in dit gesprek; daarna nooit meer om contactgegevens vragen. */
+  leadCaptured: boolean;
+  /** Het formulier is al één keer aangeboden; niet blijven aandringen bij elk antwoord. */
+  leadOffered: boolean;
 }
 
 /** Bewust sessionStorage: een gesprek hoort bij dit tabblad, niet bij de bezoeker voor altijd. */
@@ -20,7 +24,7 @@ function keyFor(siteKey: string): string {
 }
 
 export function loadState(siteKey: string): StoredState {
-  const empty: StoredState = { session: null, messages: [] };
+  const empty: StoredState = { session: null, messages: [], leadCaptured: false, leadOffered: false };
   try {
     const raw = sessionStorage.getItem(keyFor(siteKey));
     if (!raw) return empty;
@@ -28,6 +32,8 @@ export function loadState(siteKey: string): StoredState {
     return {
       session: isSession(parsed.session) ? parsed.session : null,
       messages: Array.isArray(parsed.messages) ? parsed.messages.filter(isMessage) : [],
+      leadCaptured: parsed.leadCaptured === true,
+      leadOffered: parsed.leadOffered === true,
     };
   } catch {
     // Kapotte of geblokkeerde opslag (privémodus) mag de widget nooit stukmaken.
@@ -42,6 +48,8 @@ export function saveState(siteKey: string, state: StoredState): void {
       JSON.stringify({
         session: state.session,
         messages: state.messages.slice(-MAX_STORED_MESSAGES),
+        leadCaptured: state.leadCaptured,
+        leadOffered: state.leadOffered,
       }),
     );
   } catch {

@@ -1,4 +1,5 @@
 import type { WidgetConfigResponse } from "@ai-lead/shared";
+import type { LeadPayload } from "./lead";
 import { createSseParser } from "./sse";
 
 /** De vorm komt uit @ai-lead/shared, zodat widget en API niet uit elkaar kunnen lopen. */
@@ -55,6 +56,39 @@ export async function startConversation(
   });
   if (!res.ok) throw await toApiError(res);
   return (await res.json()) as Session;
+}
+
+export interface SubmitLeadArgs {
+  apiBase: string;
+  conversationId: string;
+  token: string;
+  lead: LeadPayload;
+  signal?: AbortSignal;
+}
+
+/**
+ * Levert contactgegevens in bij het gesprek. Het sessietoken is de autorisatie (de bezoeker mag alleen
+ * zijn eigen gesprek), dus geen admin-token. Een tweede inzending werkt dezelfde lead bij.
+ */
+export async function submitLead(args: SubmitLeadArgs): Promise<{ created: boolean }> {
+  const res = await fetch(`${args.apiBase}/api/v1/conversations/${args.conversationId}/lead`, {
+    method: "POST",
+    credentials: "omit",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${args.token}`,
+    },
+    body: JSON.stringify(args.lead),
+    signal: args.signal,
+  });
+  if (!res.ok) throw await toApiError(res);
+
+  try {
+    const body = (await res.json()) as { created?: unknown };
+    return { created: body.created === true };
+  } catch {
+    return { created: false };
+  }
 }
 
 export interface StreamArgs {

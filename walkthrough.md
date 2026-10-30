@@ -126,3 +126,37 @@ deze aanpak), Actions (wat is gewijzigd).
     geeft 409, restore raakt het model niet aan).
   - `.env.example`, `README.md`, `walkthrough.md`.
 - Validatie: `typecheck` schoon, 72/72 tests groen (was 69).
+
+## 2026-10-30 (Lead-slice: van praten naar contactgegevens)
+
+- Findings: de assistent kon een gesprek voeren maar hield niets vast. De `leads`-tabel bestond al sinds
+  `0001_init.sql` (met `UNIQUE (conversation_id)`), maar er was geen route, geen formulier en geen manier om
+  te zien wat er binnenkwam. Een lead die niemand kan lezen is geen lead.
+- Conclusions: de bezoeker schrijft met zijn eigen sessietoken, niet met de admin-token. Het gesprek is de
+  identiteit; `UNIQUE (conversation_id)` maakt een tweede inzending een update in plaats van een dubbele rij.
+  Minstens e-mail of telefoon is verplicht — een lead zonder contactmogelijkheid is een notitie.
+- Conclusions: het aanbod is deterministisch (`shouldOfferLead`), niet model-gedreven. Een model laten
+  "inschatten" of iemand een lead is, is niet te testen en niet aan een klant uit te leggen. De regel: na drie
+  beurten één keer aanbieden; zodra de assistent blokkeert (budget op of gesprekslimiet) altijd, en dan zonder
+  "Later"-knop, want doorgeven is het enige dat nog werkt.
+- Conclusions: de "Later"-knop verdwijnt alleen bij blokkade. Iemand die zelf wil typen mag dat; iemand wiens
+  assistent op is heeft geen keuze meer, en een knop die niets oplevert is erger dan geen knop.
+- Bug gevonden in de browser: de aanbieding sloot zichzelf meteen weer. `shouldOfferLead` zet `alreadyOffered`
+  op true, waardoor `leadDue` in dezelfde render false werd en het formulier dus nooit zichtbaar was. Opgelost
+  door de aanbieding te openen én te markeren in hetzelfde effect.
+- Bug voorkomen: `type="email"` laat de browser zijn eigen validatie doen vóór `onSubmit`, dus de Nederlandse
+  foutmelding zou nooit verschijnen. Formulier heeft nu `noValidate`; `type` blijft voor het toetsenbord op mobiel.
+- Actions:
+  - `packages/shared/src/index.ts`: `submitLeadInput` (strict, minstens e-mail of telefoon), `leadsQuery`.
+  - `packages/api/src/app.ts`: `POST /conversations/:id/lead` (201 nieuw, 200 update) en
+    `GET /admin/sites/:id/leads`, plus `normalizeLeadBody` (trimmen, e-mail lowercase, lege velden weglaten).
+  - `packages/api/test/leads.test.ts` (nieuw, 9 tests).
+  - `packages/widget/src/lead.ts` (nieuw): validatie en de aanbiedingsregel, zonder DOM.
+  - `packages/widget/src/api.ts`: `submitLead`.
+  - `packages/widget/src/session.ts`: `leadCaptured` en `leadOffered` in de opgeslagen toestand.
+  - `packages/widget/src/ui/App.tsx`: formulier, invite-link, geblokkeerde stand, bevestiging als bericht.
+  - `packages/widget/src/styles.ts`, `packages/widget/test/lead.test.ts` (11 tests), `README.md`.
+- Validatie: API 9/9 nieuw, widget 31/31, typecheck schoon op api/shared/widget, build 33,29 kB (12,53 kB gzip).
+  In de browser gecontroleerd: aanbieding na drie beurten, leeg verzenden geeft de juiste fout met twee rode
+  velden, verzenden schrijft de lead (admin-route gaf `bo@example.nl`, getrimd en lowercase), formulier blijft
+  weg na herladen, en bij budget 0 opent het formulier direct zonder "Later" met een uitgeschakeld invoerveld.

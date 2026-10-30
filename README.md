@@ -47,6 +47,8 @@ zet het bij elke run. Zonder `APP_DB_PASSWORD` stopt hij met een melding in plaa
 | `POST /api/v1/conversations` | header `X-Site-Key` | Gesprek starten, geeft `conversationId` + sessietoken (2 uur, gebonden aan dat ene gesprek) |
 | `POST /api/v1/conversations/:id/messages` | `Bearer <sessietoken>` | Bericht opslaan en het volledige antwoord terugkrijgen |
 | `POST /api/v1/conversations/:id/messages/stream` | `Bearer <sessietoken>` | Zelfde, maar als SSE: `delta` `{text}` … daarna `done` `{messageId}` of `error` `{error, requestId}` |
+| `POST /api/v1/conversations/:id/lead` | `Bearer <sessietoken>` | Contactgegevens van de bezoeker; `201` bij nieuw, `200` bij overschrijven, minstens e-mail of telefoon |
+| `GET /api/v1/admin/sites/:id/leads?limit=50` | `Bearer ADMIN_TOKEN` | Ingekomen leads, nieuwste eerst |
 
 Foutcodes voor de widget: `401` token ongeldig, `429` rate limit of gesprekslimiet, `503 budget_exceeded` (dagbudget van de site op),
 `502 provider_unavailable` (alleen niet-streaming; bij streaming komt dit als `error`-event, omdat de stream dan al open is).
@@ -111,6 +113,10 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
   sessietoken geldt (2 uur). De begroeting wordt alleen in de UI gezet; de API bewaart hem niet.
 - **De AI-melding** staat permanent in de header ("AI-assistent · antwoorden kunnen onjuist zijn");
   dat is de transparantieverplichting, geen optie.
+- **Leadformulier**: altijd bereikbaar via een link boven het invoerveld, en het opent zichzelf na drie
+  beurten zonder lead. Zodra de assistent blokkeert (dagbudget op of gesprekslimiet) opent het formulier
+  meteen en verdwijnt de "Later"-knop: dan is doorgeven het enige dat nog werkt. De regel is
+  deterministisch (`shouldOfferLead` in `src/lead.ts`) — geen model dat "inschat" of iemand een lead is.
 - **Fouten** worden naar één Nederlandse regel vertaald (`budget_exceeded`, `rate_limited`, …).
   Bij een configuratiefout mount de widget geen knop — een dode knop is erger dan geen knop — en
   schrijft hij één gerichte waarschuwing met prefix `[ai-lead]` naar de console.
@@ -157,4 +163,5 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
   Mistral en een bewaartermijn voor gesprekken. Beide horen bij de transparantieplicht en de AVG, niet bij "later".
 - Rate limiter is in geheugen: prima voor één instantie, vervangen zodra je meerdere draait.
 - `knowledge_*` (komt met fase 4).
-- Spamcheck/honeypot op het leadformulier en een leadroute (fase 3).
+- Spamcheck/honeypot op het leadformulier, en iets dat de klant waarschuwt als er een lead binnenkomt
+  (nu moet je `GET /admin/sites/:id/leads` zelf pollen). E-mail of webhook is de logische volgende stap.

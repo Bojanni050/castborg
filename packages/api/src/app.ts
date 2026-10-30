@@ -5,8 +5,10 @@ import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import {
   createSiteInput,
+  leadsQuery,
   sendMessageInput,
   siteSettingsHistoryQuery,
+  submitLeadInput,
   updateSiteSettingsInput,
   type WidgetConfigResponse,
 } from "@ai-lead/shared";
@@ -107,7 +109,37 @@ async function readJson(c: Context): Promise<unknown> {
   }
 }
 
+/**
+ * Lege formuliervelden betekenen "niet ingevuld", niet "lege string". Zonder dit zou een formulier
+ * dat alle velden meestuurt stuklopen op de e-mailvalidatie. E-mail gaat naar kleine letters.
+ */
+function normalizeLeadBody(value: unknown): unknown {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (typeof raw !== "string") {
+      out[key] = raw;
+      continue;
+    }
+    const trimmed = raw.trim();
+    if (trimmed === "") continue;
+    out[key] = key === "email" ? trimmed.toLowerCase() : trimmed;
+  }
+  return out;
+}
+
 type TurnStatus = "ok" | "error" | "aborted";
+
+interface LeadRow {
+  id: string;
+  conversation_id: string | null;
+  name: string | null;
+  email: string | null;
+  phone: string | null;
+  message: string | null;
+  status: string;
+  created_at: Date;
+}
 
 interface TurnSettings {
   system_prompt: string;
@@ -391,6 +423,42 @@ export function createApp(deps: AppDeps): Hono {
     return respondToUpdate(c, await applySiteUpdate(db, c.req.param("id"), parsed.data, actor));
   });
 
+  // ---------------------------------------------------------------------------
+  // Beheer: leads van deze site. Een lead die niemand leest is geen lead.
+  // ---------------------------------------------------------------------------
+  app.get("/api/v1/admin/sites/:id/leads", async (c) => {
+    if (!authenticateAdmin(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const parsed = leadsQuery.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const leads = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return null;
+      const rows = (
+        await q.query<LeadRow>(
+          `SELECT id, conversation_id, name, email, phone, message, status, created_at
+             FROM leads ORDER BY created_at DESC, id DESC LIMIT $1`,
+          [parsed.data.limit],
+        )
+      ).rows;
+      return rows.map((row) => ({
+        id: row.id,
+        conversationId: row.conversation_id,
+        name: row.name,
+        email: row.email,
+        phone: row.phone,
+        message: row.message,
+        status: row.status,
+        createdAt: row.created_at.toISOString(),
+      }));
+    });
+    if (!leads) return c.json({ error: "not_found" }, 404);
+    return c.json({ leads });
+  });
+
   app.get("/api/v1/admin/sites/:id/history", async (c) => {
     if (!authenticateAdmin(c)) return c.json({ error: "unauthorized" }, 401);
 
@@ -622,6 +690,56 @@ export function createApp(deps: AppDeps): Hono {
         /* client is weg */
       }
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Publiek (token): lead achterlaten. Nog eens sturen is een update, geen tweede lead.
+  // ---------------------------------------------------------------------------
+  app.post("/api/v1/conversations/:id/lead", async (c) => {
+    const bearer = (c.req.header("authorization") ?? "").replace(/^Bearer\s+/i, "");
+    const claims = verifySessionToken(bearer, sessionSecret);
+    if (!claims || claims.conversationId !== c.req.param("id")) return c.json({ error: "unauthorized" }, 401);
+
+    if (!limits.ipMessage.check(`lead:${clientIp(c)}`)) return c.json({ error: "rate_limited" }, 429);
+
+    const parsed = submitLeadInput.safeParse(normalizeLeadBody(await readJson(c)));
+    if (!parsed.success) return c.json({ error: "invalid_input", hint: "minstens e-mail of telefoon" }, 400);
+    const input = parsed.data;
+
+    const result = await withTenant(db, claims.siteId, async (q) => {
+      const conv = await q.query("SELECT 1 FROM conversations WHERE id = $1", [claims.conversationId]);
+      if (conv.rowCount === 0) return null;
+
+      const existing = (
+        await q.query<{ id: string }>("SELECT id FROM leads WHERE conversation_id = $1", [claims.conversationId])
+      ).rowCount;
+
+      const row = (
+        await q.query<{ id: string }>(
+          `INSERT INTO leads (site_id, conversation_id, name, email, phone, message)
+                VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (conversation_id) DO UPDATE
+                SET name = EXCLUDED.name,
+                    email = EXCLUDED.email,
+                    phone = EXCLUDED.phone,
+                    message = EXCLUDED.message
+           RETURNING id`,
+          [
+            claims.siteId,
+            claims.conversationId,
+            input.name ?? null,
+            input.email ?? null,
+            input.phone ?? null,
+            input.message ?? null,
+          ],
+        )
+      ).rows[0]!;
+
+      await q.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [claims.conversationId]);
+      return { leadId: row.id, created: existing === 0 };
+    });
+    if (!result) return c.json({ error: "not_found" }, 404);
+    return c.json(result, result.created ? 201 : 200);
   });
 
   return app;

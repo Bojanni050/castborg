@@ -78,6 +78,33 @@ export function buildStyles(primaryColor: string, position: string): string {
 .al-notice { margin: 0; padding: 8px 14px; font-size: 12px; color: #9a3412;
   background: #fff7ed; border-top: 1px solid #fed7aa; }
 
+/* Leadformulier: één kaart tussen de berichten en het invoerveld. */
+.al-lead { display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+  border-top: 1px solid #e2e8f0; background: #f8fafc; }
+.al-lead-title { font-size: 13px; font-weight: 600; color: #0f172a; }
+.al-lead-hint { font-size: 12px; line-height: 1.45; color: #64748b; }
+.al-lead input, .al-lead textarea { width: 100%; padding: 8px 10px; font: inherit; font-size: 13px;
+  color: inherit; background: #fff; border: 1px solid #e2e8f0; border-radius: 9px; }
+.al-lead textarea { resize: none; }
+.al-lead input:focus, .al-lead textarea:focus { outline: none; border-color: var(--al-primary);
+  box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+.al-lead-row { display: flex; gap: 8px; }
+.al-lead-row > * { flex: 1; min-width: 0; }
+.al-lead .al-invalid { border-color: #dc2626; }
+.al-lead-error { margin: 0; font-size: 12px; color: #b91c1c; }
+.al-lead-actions { display: flex; align-items: center; gap: 10px; }
+.al-lead-submit { padding: 8px 14px; border: 0; border-radius: 9px; cursor: pointer;
+  font: inherit; font-size: 13px; font-weight: 600; color: #fff; background: var(--al-primary); }
+.al-lead-submit:hover:not(:disabled) { background: var(--al-primary-dark); }
+.al-lead-submit:disabled { opacity: .6; cursor: default; }
+.al-lead-skip { padding: 8px 4px; border: 0; background: none; cursor: pointer;
+  font: inherit; font-size: 12px; color: #64748b; }
+.al-lead-skip:hover { color: #0f172a; }
+.al-lead-invite { margin: 0; padding: 6px 14px; font-size: 12px; color: #64748b;
+  border-top: 1px solid #e2e8f0; }
+.al-lead-link { padding: 0; border: 0; background: none; cursor: pointer; font: inherit;
+  font-size: 12px; color: var(--al-primary); text-decoration: underline; }
+
 .al-composer { display: flex; align-items: flex-end; gap: 8px; padding: 10px;
   border-top: 1px solid #e2e8f0; background: #fff; }
 .al-input { flex: 1; min-height: 38px; max-height: 120px; resize: none; padding: 9px 11px;
