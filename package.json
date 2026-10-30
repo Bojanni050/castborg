@@ -1,0 +1,14 @@
+{
+  "name": "ai-lead",
+  "private": true,
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "db:up": "docker compose up -d db",
+    "db:migrate": "pnpm --filter @ai-lead/api migrate",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
