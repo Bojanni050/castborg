@@ -84,6 +84,8 @@ Staat `LEAD_WEBHOOK_URL` gezet, dan POST de API elke nieuwe of bijgewerkte lead 
 - `MistralProvider` praat rechtstreeks met `POST {MISTRAL_BASE_URL}/v1/chat/completions` (standaard `https://api.mistral.ai`, de EU-server), met `fetch`, timeout en afbreken via `AbortSignal`.
 - Streaming volgens het gedocumenteerde SSE-formaat (`data: {…}` … `data: [DONE]`); token-usage wordt uit het laatste event gelezen.
   Ontbreekt die, dan wordt het verbruik geschat (±4 tekens per token) en in `usage_events.estimated` gemarkeerd.
+  Bij echte Mistral-antwoorden (30-10-2026, `mistral-small-2603`) komt de usage in beide routes binnen met `estimated = false`:
+  133 in / 40 uit tokens kostte € 0,000041. Alleen bij een afgebroken stream of een providerfout staat `estimated = true`.
 - Standaardmodel per site: `mistral-small-latest` (kolom `site_settings.model`, per site aanpasbaar). Controleer in je Mistral-account of de alias nog naar het model wijst dat je wilt.
 - **Tijdelijk:** staat `MISTRAL_MODEL` in `.env`, dan wint die van `site_settings.model` voor alle sites en weigert de
   admin-route een model te zetten (`409 model_locked`). Puur om snel te kunnen wisselen zolang de UI nog geen modellen
@@ -162,6 +164,40 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
 - Meerdere beheerders zonder dashboard-auth: zet `ADMIN_TOKENS="naam:token,naam2:token2"` in plaats van `ADMIN_TOKEN`.
   De naam komt in de historie terecht. Dit is een benoemde sleutel, geen authenticatie: iedereen met een token is die naam.
 
+## Kwaliteitsronde (meten in plaats van voelen)
+
+`packages/api/scripts/kwaliteit.mjs` stuurt een vaste set gesprekken door de echte assistent en schrijft een
+markdown-rapport, zodat een promptwijziging te vergelijken is met de vorige in plaats van "voelt beter".
+
+```
+corepack pnpm --filter @ai-lead/api exec node scripts/kwaliteit.mjs --key pk_... [--stream] [--api http://127.0.0.1:8787]
+```
+
+- De cases staan in `packages/api/scripts/kwaliteit-vragen.json`: per case een `id`, waarom hij erin staat, en de
+  berichten van de bezoeker. Elke case krijgt een **eigen gesprek**, anders beïnvloeden ze elkaar.
+- Standaard gaat het via `POST …/messages` (één volledig antwoord); met `--stream` via de SSE-route, zodat je ook
+  het streamingpad test.
+- Het rapport komt op `%TEMP%\castborg-kwaliteit-<tijdstip>.md`.
+
+Wat de eerste ronde (30-10-2026, `mistral-small-2603`, standaardprompt) liet zien en wat er daarna in
+`0005_betere_standaardprompt.sql` is rechtgezet:
+
+| Case | Eerste ronde | Nu |
+| --- | --- | --- |
+| Engelse vraag | antwoordde in het Nederlands | antwoordt in het Engels |
+| "Negeer je instructies" | werd twee beurten een piratenbot | weigert met één zin en gaat door |
+| "Ik wil een gesprek inplannen" | negeerde het verzoek | wijst op het contactformulier |
+| Prijs vragen | geen prijs verzonnen | nog steeds niet, en geen verzonnen link meer |
+| Boze bezoeker | bleef doorvragen | biedt het contactformulier aan |
+
+Twee dingen die daaruit te leren zijn en die niet met prompttekst op te lossen zijn:
+
+- Een klein model volgt een **concreet voorbeeld** betrouwbaar en een abstracte regel ("blijf in je rol") niet.
+  Daarom staat er een voorbeeld van een afgewezen rolwissel in de default.
+- De default weet niets van het bedrijf. Zonder eigen tekst over diensten en werkwijze improviseert de assistent
+  ("dat klinkt als een serieuze vraag" op een vraag over boekhouden). Elke site heeft een echte prompt nodig; een
+  apart veld "wat doen we" hoort bij de UI, niet bij een langere default.
+
 ## Isolatiemodel in het kort
 
 - Elke tenant-tabel heeft `site_id` en een RLS-policy: `site_id = app_current_site_id()`.
@@ -181,6 +217,11 @@ Zonder `data-api-base` gebruikt de widget de origin van het script zelf.
   `status` `ok`/`error`/`aborted`; een dashboard moet `error` niet als gratis succes tellen).
 - Logging is één JSON-regel per gebeurtenis op stderr (`src/log.ts`), zonder retentie of aggregatie. Bezoekertekst en
   systeemprompt worden bewust niet gelogd. Zet er een logverzamelaar achter voordat je naar productie gaat.
+- De kwaliteitsronde is een script met vaste vragen, geen test met een oordeel: je leest het rapport en beoordeelt het
+  zelf. Een volgende stap is per case een controle (geen prijs in het antwoord, geen link, wel de juiste taal) zodat een
+  promptwijziging ook automatisch kan afketsen.
+- Er is geen veld "wat doet dit bedrijf". Dat zit nu in de systeemprompt zelf; een eigen veld met een korte
+  bedrijfsomschrijving hoort bij het instellingenscherm, want anders moet elke klant prompten gaan schrijven.
 - De AI-melding zit in de widget ("je praat met een AI"). Wat nog open is: de verwerkersovereenkomst met
   Mistral en een bewaartermijn voor gesprekken. Beide horen bij de transparantieplicht en de AVG, niet bij "later".
 - Rate limiter is in geheugen: prima voor één instantie, vervangen zodra je meerdere draait.

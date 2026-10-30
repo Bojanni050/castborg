@@ -194,3 +194,36 @@ deze aanpak), Actions (wat is gewijzigd).
   eigen ontvanger op 127.0.0.1:9099: lead verstuurd in de browser, melding ontvangen, signature nagerekend en
   gelijk. Honeypot end-to-end bewezen doordat mijn eigen test per ongeluk het verborgen veld vulde: server
   logde `lead_honeypot`, sloeg niets op, widget toonde gewoon de bevestiging.
+
+## 2026-10-30 (Echte Mistral, en wat de kwaliteitsronde aan het licht bracht)
+
+- Findings: de eerste sleutel in `.env` gaf `401 Invalid API Key` op `/v1/models` én `/v1/chat/completions`, los van de
+  app getest. Waarde was schoon (32 tekens, geen quotes of spaties), dus het was een ingetrokken of verkeerde sleutel.
+  Na een verse sleutel werkte alles. Twee echte beurten bevestigen wat in de handover "nog niet geverifieerd" stond:
+  `usage_events` krijgt echte tokens met `estimated = false`, in **beide** routes. 133 in / 40 uit kostte € 0,000041,
+  de reservering was netjes opgeruimd, en `request_id` kwam overeen met wat de API teruggaf.
+- Findings: de kwaliteitsronde met vaste vragen liet vier dingen zien die een klant direct merkt: Nederlands antwoord op
+  een Engelse vraag, "negeer je instructies" maakte de assistent twee beurten lang een piratenbot, "ik wil een gesprek
+  inplannen" werd genegeerd, en in een latere versie verzon hij een link naar een contactformulier dat niet bestaat.
+- Conclusions: prompttekst alleen is niet genoeg, maar het voorbeeld doet het werk. Een abstracte regel ("blijf in je
+  rol") wordt door een klein model genegeerd; één concreet voorbeeld van een afgewezen rolwissel niet. Daarom staat dat
+  voorbeeld in de default, samen met een expliciete taalregel (de instructietaal wint anders van de bezoekerstaal) en een
+  verbod op markdown en links (de widget rendert platte tekst, en een verzonnen link is erger dan geen link).
+- Conclusions: de default mag niets van het bedrijf verzinnen. Zonder eigen tekst improviseert de assistent vrolijk mee
+  met een vraag over boekhouden. Dat is niet met een langere default op te lossen: elke site heeft een prompt met echte
+  inhoud nodig, en een veld "wat doen we" hoort bij het instellingenscherm.
+- Bug in mijn eigen migratie: `\n` zonder `E`-prefix is in Postgres een backslash plus n, dus de eerste versie van de
+  prompt stond vol letterlijke `\n`. Hersteld door alle literals `E'...'` te maken en de prompttekst één keer in een
+  `DO`-blok te zetten (variabele + `format(%L)` voor de default), zodat default en UPDATE niet uit elkaar kunnen lopen.
+  `0005` was alleen lokaal toegepast, dus hij is in plaats van een `0006` opnieuw geschreven; zodra hij gepusht is,
+  geldt weer append-only.
+- Actions:
+  - `packages/api/migrations/0005_betere_standaardprompt.sql` (nieuw): nieuwe default met taalregel, rolvastheid plus
+    voorbeeld, verbod op verzonnen diensten/links/markdown, en een UPDATE voor sites die nog op de oude default staan.
+  - `packages/api/scripts/kwaliteit.mjs` + `kwaliteit-vragen.json` (nieuw): vaste cases, eigen gesprek per case,
+    `--stream` voor het streamingpad, rapport naar `%TEMP%`.
+  - `README.md`: sectie "Kwaliteitsronde", de geverifieerde usage-cijfers, en twee open punten erbij (geen oordeel per
+    case, geen veld voor de bedrijfsomschrijving).
+- Validatie: API 85/85, typecheck schoon. Kwaliteitsronde drie keer gedraaid en vergeleken; de vier problemen zijn weg,
+  met als restpunten dat de assistent het aanbod soms herhaalt en dat hij zonder bedrijfsinformatie niets zinnigs over
+  de diensten kan zeggen.
