@@ -235,7 +235,9 @@ describe("dagbudget", () => {
     const app = makeApp();
     const c = await newConversation(app, "Budget");
     // Korte prompt: de inputschatting telt mee in de reservering, dus houd die deterministisch.
-    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
+    // De reservering is inmiddels ~0,10 (systeemprompt + overdrachtsregel + 4 uitgavetokens):
+    // 0,15 laat twee beurten toe, een derde blijft boven de grens.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.15 WHERE site_id = $1", [c.site.id]);
 
     expect((await (await stream(app, c, "een")).text()).includes("event: done")).toBe(true); // totaal 0,03
     expect((await (await stream(app, c, "twee")).text()).includes("event: done")).toBe(true); // totaal 0,06 >= 0,05
@@ -257,8 +259,9 @@ describe("dagbudget", () => {
     const app = makeApp();
     const a = await newConversation(app, "BudgetA");
     const b = await newConversation(app, "BudgetB");
-    // 0,02 is genoeg voor de reservering van de eerste beurt (0,018) maar niet voor een tweede.
-    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.02 WHERE site_id = $1", [a.site.id]);
+    // Een reservering is ~0,084; met 0,03 gecommitteerd na de eerste beurt is een tweede
+    // ~0,117 en dat gaat voorbij aan 0,10. Genoeg voor één beurt, niet voor twee.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.10 WHERE site_id = $1", [a.site.id]);
 
     await (await stream(app, a)).text();
     expect((await stream(app, a)).status).toBe(503); // A is op
@@ -270,7 +273,8 @@ describe("dagbudget", () => {
     const app = makeApp();
     const c = await newConversation(app, "Gisteren");
     // Korte prompt: de inputschatting telt mee in de reservering, dus houd die deterministisch.
-    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.05 WHERE site_id = $1", [c.site.id]);
+    // Reservering ≈ 0,10, dus 0,12 laat één beurt door.
+    await admin.query("UPDATE site_settings SET system_prompt = 'a', daily_budget_eur = 0.12 WHERE site_id = $1", [c.site.id]);
     await admin.query(
       `INSERT INTO usage_events (site_id, provider, model, cost_eur, status, created_at)
        VALUES ($1, 'mistral', 'm', 99, 'ok', now() - interval '2 days')`,

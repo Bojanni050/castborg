@@ -83,7 +83,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
     return fresh;
   }
 
-  async function deliver(text: string, assistantId: string, controller: AbortController): Promise<void> {
+  async function deliver(text: string, assistantId: string, controller: AbortController): Promise<{ handover?: boolean }> {
     const run = async (activeSession: Session) =>
       sendMessageStream({
         apiBase,
@@ -100,15 +100,14 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
 
     let activeSession = await ensureSession();
     try {
-      await run(activeSession);
+      return await run(activeSession);
     } catch (err) {
       // Token verlopen of gesprek onbekend: het bericht is dan nog niet opgeslagen, dus één keer
       // opnieuw met een vers gesprek is veilig.
       if (err instanceof ApiError && err.status === 401) {
         clearState(config.siteKey);
         activeSession = await ensureSession(true);
-        await run(activeSession);
-        return;
+        return await run(activeSession);
       }
       throw err;
     }
@@ -128,7 +127,13 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
     setSending(true);
 
     try {
-      await deliver(text, assistantId, controller);
+      const out = await deliver(text, assistantId, controller);
+      // Na een overdracht opent het leadformulier meteen: de tekst zegt al dat er contact wordt
+      // opgenomen, dus de bezoeker mag het niet zelf nog moeten zoeken.
+      if (out.handover && !leadCaptured && !blocked) {
+        setLeadOpen(true);
+        setLeadOffered(true);
+      }
     } catch (err) {
       // Het lege antwoord weghalen; het gebruikersbericht blijft staan.
       setMessages((prev) => prev.filter((m) => !(m.id === assistantId && m.text === "")));

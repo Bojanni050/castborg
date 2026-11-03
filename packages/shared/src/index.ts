@@ -125,6 +125,10 @@ export const deletionsQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
+export const handoversQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+});
+
 /** Inloggen op het dashboard. Eén operator, één wachtwoord uit de omgeving. */
 export const dashboardLoginInput = z
   .object({

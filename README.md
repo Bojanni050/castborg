@@ -248,6 +248,24 @@ komt, bijvoorbeeld een CDN.
 - Alleen pagina's met `status='ok'` nemen deel aan de retrieval, dus een mislukte herindexering zet de oude kennis
   bewust niet uit.
 
+## Menselijke overdracht
+
+- Vraagt een bezoeker om een mens (NL en EN, deterministische woordherkenning in `src/handover.ts`, geen modelinschatting),
+  dan komt er vastgestelde tekst terug ("ik zet dit gesprek klaar voor een medewerker…") en het leadformulier opent in
+  het widget automatisch, zodat de bezoeker meteen contactgegevens kan achterlaten.
+- Elke overdrachtsvraag is een **beurt zonder provider en zonder budgetreservering** (`reserve: false`): een op dat
+  moment uitgeput dagbudget mag een hulpvraag niet blokkeren. De beurt telt wél als kostenloze `usage_event`
+  (provider `deterministic`) en als gewone berichten in het transcript.
+- Per gesprek staat er **één rij** in `handovers` (migratie 0009, UNIQUE op `conversation_id`): opnieuw vragen maakt
+  geen tweede rij en verstuurt de webhook ook maar één keer, met het event `handover.requested` (payload: `handoverId`,
+  `conversationId`, `triggerMessage`, `receivedAt`) via dezelfde ondertekende leadmelding-weg als `lead.created`.
+- Het dashboard heeft per site de sectie **Overdrachten**: lijst met open en afgehandelde verzoeken, transcript inzien
+  en een verzoek afronden (status `done`, `handled_at`). De webhook-melding blijft de actieve pushtermijn; het dashboard
+  is de val erachter.
+- Bovendien zit er in de systeemprompt altijd een overdrachtsregel: zegt de bezoeker het in andere bewoordingen
+  (om de letterlijke lijst heen, of in een andere taal), dan verwijst de gewone assistent naar het contactformulier
+  in plaats van het zelf te "regelen".
+
 ## Dashboard
 
 `/` serveert het dashboard als `packages/dashboard/dist` bestaat (`corepack pnpm --filter @ai-lead/dashboard build`).

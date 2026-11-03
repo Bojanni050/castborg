@@ -88,6 +88,21 @@ export interface DeletionRow {
   actorId: string;
 }
 
+export interface HandoverRow {
+  id: string;
+  conversationId: string;
+  triggerMessage: string;
+  status: string;
+  createdAt: string;
+  handledAt: string | null;
+}
+
+export interface TranscriptRow {
+  role: string;
+  content: string;
+  createdAt: string;
+}
+
 export interface SourceRow {
   id: string;
   url: string;
@@ -182,6 +197,14 @@ export const api = {
     request<{ deleted: { pages: number; chunks: number } }>(`/api/v1/admin/sites/${id}/sources/${sourceId}`, {
       method: "DELETE",
     }),
+  handovers: (id: string, limit = 50) =>
+    request<{ handovers: HandoverRow[] }>(`/api/v1/admin/sites/${id}/handovers?limit=${limit}`),
+  completeHandover: (id: string, handoverId: string) =>
+    request<{ handover: { id: string; status: string } }>(`/api/v1/admin/sites/${id}/handovers/${handoverId}/complete`, {
+      method: "POST",
+    }),
+  transcript: (id: string, conversationId: string) =>
+    request<{ messages: TranscriptRow[] }>(`/api/v1/admin/sites/${id}/conversations/${conversationId}/messages`),
 };
 
 /** Nederlandse tekst voor de fouten die de API echt teruggeeft. */

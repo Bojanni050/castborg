@@ -107,7 +107,7 @@ export interface StreamArgs {
  * HTTP-status terug; een fout tijdens de stream als `error`-event. Beide worden een ApiError, zodat
  * de UI één pad hoeft te kennen.
  */
-export async function sendMessageStream(args: StreamArgs): Promise<{ requestId?: string }> {
+export async function sendMessageStream(args: StreamArgs): Promise<{ requestId?: string; handover?: boolean }> {
   const res = await fetch(`${args.apiBase}/api/v1/conversations/${args.conversationId}/messages/stream`, {
     method: "POST",
     credentials: "omit",
@@ -135,7 +135,7 @@ export async function sendMessageStream(args: StreamArgs): Promise<{ requestId?:
         if (ev.event === "delta") {
           args.onDelta(readText(ev.data));
         } else if (ev.event === "done") {
-          return readRequestId(ev.data);
+          return { ...readHandover(ev.data), ...readRequestId(ev.data) };
         } else if (ev.event === "error") {
           throw new ApiError(502, readErrorCode(ev.data));
         }
@@ -164,6 +164,16 @@ function readRequestId(data: string): { requestId?: string } {
   try {
     const parsed = JSON.parse(data) as { requestId?: unknown };
     return typeof parsed.requestId === "string" ? { requestId: parsed.requestId } : {};
+  } catch {
+    return {};
+  }
+}
+
+/** De overdrachtsvlag staat alleen in het done-event; alles anders is een gewone beurt. */
+function readHandover(data: string): { handover?: boolean } {
+  try {
+    const parsed = JSON.parse(data) as { handover?: unknown };
+    return parsed.handover === true ? { handover: true } : {};
   } catch {
     return {};
   }

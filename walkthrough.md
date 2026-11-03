@@ -376,3 +376,45 @@ deze aanpak), Actions (wat is gewijzigd).
     de gehele bevragingsflow met een gestubde fetch, en tenant-isolatie op de nieuwe tabellen.
 - Validatie: alle 126 tests groen (112 bestaande + 14 nieuwe), typecheck schoon in alle vier de
   packages, tegen een lokale Postgres 18.6 op poort 5432 (`DATABASE_URL_MIGRATOR`-override).
+
+
+## 2026-11-03 (Menselijke overdracht)
+
+- Findings: een bezoeker die om een mens vraagt kreeg tot nu toe een prijzige modelzin die niets belooft —
+  het slechtste gesprek dat het widget kan hebben. Daarnaast was er geen plek waar de sitehouder zo'n
+  verzoek kan zien, en het leadformulier opende alleen na 3 beurten.
+- Conclusions: detectie zonder model (woordenlijst met NL/EN-frases) bewust vóór de provider: een
+  overdracht is een feit dat vaststaat, geen inschatting. De beurt is deterministisch: vastgelegde
+  antwoordtekst, geen provider-call, en — bewust — geen budgetreservering, want een uitgeput dagbudget
+  mag exact díe beurt niet blokkeren. INSERT met ON CONFLICT (conversation_id): één rij per gesprek, de
+  webhook-melding gaat alleen bij de eerste vraag de deur uit. In elke systeemprompt zit bovendien een
+  overdrachtsregel, zodat de assistent een vraag in andere bewoordingen doorverwijst naar het
+  contactformulier in plaats van het zelf te improviseren.
+- Actions:
+  - `packages/api/migrations/0009_handover.sql`: `handovers` (UNIQUE op conversation_id, status
+    open/done, trigger_message), RLS volgens het 0001-patroon. Gevonden tijdens de testrun: de
+    beloofde UNIQUE-constraint ontbrak in de eerste versie — `ON CONFLICT` ving dat direct met
+    "there is no unique or exclusion constraint"; de test verdiende zijn brood.
+  - `packages/api/src/handover.ts`: patroon, vaste reply en systeemregel die bij ELKE beurt achter de
+    systeemprompt komt. De regel kost ~85 tokens aan inputschatting, dus de budget-asserts in
+    settings.test en stream.test zijn daarop bijgesteld (budgetten 0,10–0,15 in plaats van 0,015–0,05).
+  - `packages/api/src/app.ts`: `beginTurn` kreeg `opts.reserve` (false → alleen systeemprompt en
+    gebruikersbericht, reservationId null, GEEN budget-lock en budgetcheck; het berichtenlimiet geldt
+    wél); `finishTurn` null-safe gemaakt (req/providerName); nieuwe `handoverTurn`-helper; beide
+    berichtroutes koppelen de overdracht vóór de normale flow af met `isHandoverRequest`; admin-routes
+    `GET .../handovers`, `POST .../handovers/:id/complete` en `GET .../conversations/:id/messages`
+    (transcript); `notifyHandoverRequested` hergebruikt de ondertekende leadmelding (event
+    `handover.requested`).
+  - `packages/shared/src/index.ts`: `handoversQuery` (limit-zod).
+  - `packages/widget/src/api.ts` + `ui/App.tsx`: `sendMessageStream` leest `handover` uit het
+    done-event; na een overdracht opent het leadformulier automatisch (behalve bij reeds opgeslagen
+    lead of geblokkeerde site).
+  - `packages/dashboard/src/api.ts` + `SiteDetail.tsx`: sectie "Overdrachten" — lijst met pill-status,
+    uitklapbaar transcript, afhandelen.
+  - `packages/api/test/handover.test.ts`: 10 tests — detectie (incl. "mensenrechten" als
+    vals-negatief), vaste tekst zonder provider-call, geen tweede rij/webhook, 503 op een normale
+    beurt tegenover een 200 op de overdracht bij een opgebruikt budget, ondertekende webhook,
+    afronden (404 op de tweede poging), transcript + tenant-isolatie, en de overdrachtsregel in elke
+    systeemprompt.
+- Validatie: 136/136 tests groen (126 bestaande + 10 nieuwe), typecheck schoon in alle vier de
+  packages, tegen de lokale Postgres 18.6 op poort 5432.

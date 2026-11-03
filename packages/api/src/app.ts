@@ -12,6 +12,7 @@ import {
   addSourceInput,
   dashboardLoginInput,
   deletionsQuery,
+  handoversQuery,
   leadsQuery,
   sendMessageInput,
   siteSettingsHistoryQuery,
@@ -30,6 +31,7 @@ import {
   DASHBOARD_COOKIE,
   type DashboardAuthConfig,
 } from "./dashboard-auth.js";
+import { HANDOVER_REPLY, HANDOVER_RULE, isHandoverRequest } from "./handover.js";
 import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
 import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
@@ -206,6 +208,15 @@ interface DeletionRow {
   actor_id: string;
 }
 
+interface HandoverRow {
+  id: string;
+  conversation_id: string;
+  trigger_message: string;
+  status: string;
+  created_at: Date;
+  handled_at: Date | null;
+}
+
 interface TurnSettings {
   system_prompt: string;
   model: string;
@@ -216,18 +227,21 @@ interface TurnSettings {
 }
 
 type BeginResult =
-  | { kind: "ok"; systemPrompt: string; model: string; history: ChatTurn[]; reservationId: string }
+  | { kind: "ok"; systemPrompt: string; model: string; history: ChatTurn[]; reservationId: string | null }
   | { kind: "not_found" | "limit" | "budget" };
 
 interface FinishArgs {
   claims: SessionClaims;
-  req: ProviderRequest;
+  req: ProviderRequest | null;
   requestId: string;
-  reservationId: string;
+  /** Null bij een deterministische beurt (overdracht): er is niets gereserveerd. */
+  reservationId: string | null;
   reply: string;
   usage: Usage | null;
   status: TurnStatus;
   durationMs: number;
+  /** Alleen bij een beurt zonder provider; anders de naam van de gebruikte provider. */
+  providerName?: string;
 }
 
 /** Kolomnamen voor de beheervelden. Nooit uit de request halen: alleen deze map bepaalt de SQL. */
@@ -304,7 +318,7 @@ export function createApp(deps: AppDeps): Hono {
         [userText, MAX_CHUNKS_PER_TURN],
       )
     ).rows;
-    let prompt = basePrompt.replaceAll("{{siteName}}", siteName);
+    let prompt = basePrompt.replaceAll("{{siteName}}", siteName) + HANDOVER_RULE;
     if (rows.length === 0) return prompt;
 
     // Rangschikking is op relevantie; tot het tekencap de beste houden. En nog eens neutraliseren:
@@ -328,8 +342,13 @@ export function createApp(deps: AppDeps): Hono {
    * Het budget is een harde grens: vóór de call wordt het maximale bedrag van deze beurt gereserveerd
    * (inputschatting + maxOutputTokens). Gelijktijdige beurten zien elkaars reservering, dus samen kunnen
    * ze het dagbudget niet overschrijden. Transactie 2 ruimt de reservering weer op.
+   *
+   * `reserve: false` (deterministische beurten zonder provider, zoals de overdracht) slaat de
+   * budgetsectie over. Dat is bewust: een bezoeker die om een mens vraagt mag niet het slachtoffer
+   * zijn van een dagbudget dat een ander gesprek op eigen begroeting al op heeft.
    */
-  async function beginTurn(claims: SessionClaims, text: string): Promise<BeginResult> {
+  async function beginTurn(claims: SessionClaims, text: string, opts: { reserve?: boolean } = {}): Promise<BeginResult> {
+    const reserve = opts.reserve ?? true;
     return withTenant(db, claims.siteId, async (q) => {
       const conv = await q.query("SELECT 1 FROM conversations WHERE id = $1", [claims.conversationId]);
       if (conv.rowCount === 0) return { kind: "not_found" };
@@ -363,6 +382,22 @@ export function createApp(deps: AppDeps): Hono {
       ).rows;
 
       const systemPrompt = (await assembleSystemPrompt(q, settings.system_prompt, settings.site_name, text));
+
+      if (!reserve) {
+        await q.query("INSERT INTO messages (site_id, conversation_id, role, content) VALUES ($1, $2, 'user', $3)", [
+          claims.siteId,
+          claims.conversationId,
+          text,
+        ]);
+        return {
+          kind: "ok",
+          systemPrompt,
+          model: modelOverride ?? settings.model,
+          history: [...existing, { role: "user" as const, content: text }],
+          reservationId: null,
+        };
+      }
+
       const inputText = [systemPrompt, ...existing.map((t) => t.content), text].join("\n");
       const reservedEur =
         (estimateInputTokens(inputText) * pricing.inputEurPerMTok + maxOutputTokens * pricing.outputEurPerMTok) / 1_000_000;
@@ -408,7 +443,8 @@ export function createApp(deps: AppDeps): Hono {
 
   /** Transactie 2: antwoord (ook gedeeltelijk) opslaan, verbruik registreren en de reservering vrijgeven. */
   async function finishTurn(a: FinishArgs): Promise<string | null> {
-    const usage = a.usage ?? (a.reply ? estimateUsage(a.req, a.reply) : { inputTokens: 0, outputTokens: 0, estimated: false });
+    // Zonder provider-response (deterministische beurt) is er niets te schatten: nul kosten, exact.
+    const usage = a.usage ?? (a.req && a.reply ? estimateUsage(a.req, a.reply) : { inputTokens: 0, outputTokens: 0, estimated: false });
     return withTenant(db, a.claims.siteId, async (q) => {
       let messageId: string | null = null;
       if (a.reply) {
@@ -426,8 +462,8 @@ export function createApp(deps: AppDeps): Hono {
         [
           a.claims.siteId,
           a.claims.conversationId,
-          provider.name,
-          a.req.model,
+          a.providerName ?? provider.name,
+          a.req?.model ?? "",
           usage.inputTokens,
           usage.outputTokens,
           costEur(usage),
@@ -437,8 +473,71 @@ export function createApp(deps: AppDeps): Hono {
           a.requestId,
         ],
       );
-      await q.query("DELETE FROM usage_reservations WHERE id = $1", [a.reservationId]);
+      if (a.reservationId) await q.query("DELETE FROM usage_reservations WHERE id = $1", [a.reservationId]);
       return messageId;
+    });
+  }
+
+  /**
+   * Deterministische overdrachtsbeurt: geen provider, geen reservering, vaste tekst.
+   * beginTurn (zonder budgetreservering), één handover-rij (ON CONFLICT DO NOTHING: nóg een
+   * vraag om een mens in hetzelfde gesprek maakt geen nieuwe rij) en finishTurn met exact nul kosten.
+   */
+  async function handoverTurn(
+    claims: SessionClaims,
+    text: string,
+    requestId: string,
+  ): Promise<{ kind: "ok"; messageId: string | null; created: boolean; handoverId: string | null } | { kind: "not_found" | "limit" | "budget" }> {
+    const turn = await beginTurn(claims, text, { reserve: false });
+    // budget kan door het type mee, maar is bij reserve:false runtime onmogelijk.
+    if (turn.kind !== "ok") return turn;
+
+    const handover = await withTenant(db, claims.siteId, async (q) => {
+      const row = (
+        await q.query<{ id: string }>(
+          `INSERT INTO handovers (site_id, conversation_id, trigger_message)
+                VALUES ($1, $2, $3)
+           ON CONFLICT (conversation_id) DO NOTHING
+           RETURNING id`,
+          [claims.siteId, claims.conversationId, text],
+        )
+      ).rows[0];
+      return row ? { id: row.id, created: true } : { id: null, created: false };
+    });
+
+    const messageId = await finishTurn({
+      claims,
+      req: null,
+      requestId,
+      reservationId: null,
+      reply: HANDOVER_REPLY,
+      usage: { inputTokens: 0, outputTokens: 0, estimated: false },
+      status: "ok",
+      durationMs: 0,
+      providerName: "deterministic",
+    });
+    return { kind: "ok", messageId, created: handover.created, handoverId: handover.id };
+  }
+
+  /**
+   * Meldt een nieuw overdrachtsverzoek via de webhook, alleen als de handover-rij net is aangemaakt.
+   * Herhaalt het verzoek de bezoeker in hetzelfde gesprek, dan is de sitehouder al gewaarschuwd en
+   * volgt geen tweede melding. Fouten slikt notifyLead in.
+   */
+  async function notifyHandoverRequested(
+    leadWebhook: LeadWebhookConfig | undefined,
+    claims: SessionClaims,
+    handover: { created: boolean; handoverId: string | null },
+    triggerMessage: string,
+  ): Promise<void> {
+    if (!leadWebhook || !handover.created) return;
+    await notifyLead(leadWebhook, {
+      event: "handover.requested",
+      handoverId: handover.handoverId,
+      siteId: claims.siteId,
+      conversationId: claims.conversationId,
+      triggerMessage,
+      receivedAt: new Date().toISOString(),
     });
   }
 
@@ -1055,6 +1154,93 @@ export function createApp(deps: AppDeps): Hono {
   });
 
   // ---------------------------------------------------------------------------
+  // Beheer: overdrachtsverzoeken. De lijst, het afronden en het gesprek van de bezoeker.
+  // ---------------------------------------------------------------------------
+  app.get("/api/v1/admin/sites/:id/handovers", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const parsed = handoversQuery.safeParse(c.req.query());
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const handovers = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return null;
+      const rows = (
+        await q.query<HandoverRow>(
+          `SELECT id, conversation_id, trigger_message, status, created_at, handled_at
+             FROM handovers ORDER BY created_at DESC, id DESC LIMIT $1`,
+          [parsed.data.limit],
+        )
+      ).rows;
+      return rows.map((row) => ({
+        id: row.id,
+        conversationId: row.conversation_id,
+        triggerMessage: row.trigger_message,
+        status: row.status,
+        createdAt: row.created_at.toISOString(),
+        handledAt: row.handled_at?.toISOString() ?? null,
+      }));
+    });
+    if (!handovers) return c.json({ error: "not_found" }, 404);
+    return c.json({ handovers });
+  });
+
+  app.post("/api/v1/admin/sites/:id/handovers/:handoverId/complete", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const handoverId = c.req.param("handoverId");
+    if (!isUuid(siteId) || !isUuid(handoverId)) return c.json({ error: "not_found" }, 404);
+
+    // Alleen een open overdracht wordt afgerond; 'completen' is geen opnieuw-completen en de actie
+    // verdwijnt daarmee uit de lijst van dingen die nog te doen zijn.
+    const handover = await withTenant(
+      db,
+      siteId,
+      async (q) => {
+        const row = (
+          await q.query<{ id: string }>(
+            `UPDATE handovers SET status = 'done', handled_at = now(), updated_at = now()
+               WHERE id = $1 AND status = 'open'
+             RETURNING id`,
+            [handoverId],
+          )
+        ).rows[0];
+        return row ? { id: row.id, status: "done" as const } : null;
+      },
+      actor,
+    );
+    if (!handover) return c.json({ error: "not_found" }, 404);
+    return c.json({ handover });
+  });
+
+  /** Het gesprek van een bezoeker, alleen om te lezen na een overdracht, chronologisch. */
+  app.get("/api/v1/admin/sites/:id/conversations/:conversationId/messages", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const conversationId = c.req.param("conversationId");
+    if (!isUuid(siteId) || !isUuid(conversationId)) return c.json({ error: "not_found" }, 404);
+
+    const transcript = await withTenant(db, siteId, async (q) => {
+      const conv = (await q.query<{ id: string }>("SELECT id FROM conversations WHERE id = $1", [conversationId])).rows[0];
+      if (!conv) return null;
+      const rows = (
+        await q.query<{ role: string; content: string; created_at: Date }>(
+          "SELECT role, content, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at, id",
+          [conversationId],
+        )
+      ).rows;
+      return rows.map((m) => ({ role: m.role, content: m.content, createdAt: m.created_at.toISOString() }));
+    });
+    if (!transcript) return c.json({ error: "not_found" }, 404);
+    return c.json({ messages: transcript });
+  });
+
+  // ---------------------------------------------------------------------------
   // Publiek: widgetconfiguratie
   // ---------------------------------------------------------------------------
   app.get("/api/v1/widget/config", async (c) => {
@@ -1110,6 +1296,14 @@ export function createApp(deps: AppDeps): Hono {
     const requestId = randomUUID();
     c.header("x-request-id", requestId);
 
+    // De bezoeker vraagt om een mens: vaste tekst, geen provider, geen kosten, n prepaid handover-rij...
+    if (isHandoverRequest(text)) {
+      const handover = await handoverTurn(claims, text, requestId);
+      if (handover.kind !== "ok") return beginFailure(c, handover.kind);
+      await notifyHandoverRequested(leadWebhook, claims, handover, text);
+      return c.json({ messageId: handover.messageId, reply: HANDOVER_REPLY, requestId, handover: true });
+    }
+
     const turn = await beginTurn(claims, text);
     if (turn.kind !== "ok") return beginFailure(c, turn.kind);
 
@@ -1163,6 +1357,20 @@ export function createApp(deps: AppDeps): Hono {
     if (pre instanceof Response) return pre;
     const { claims, text } = pre;
     const requestId = randomUUID();
+
+    // Overdrachtsbeurt: één delta met de vaste tekst en een done met de handover-vlag; geen provider.
+    if (isHandoverRequest(text)) {
+      const handover = await handoverTurn(claims, text, requestId);
+      if (handover.kind !== "ok") return beginFailure(c, handover.kind);
+      await notifyHandoverRequested(leadWebhook, claims, handover, text);
+      return streamSSE(c, async (stream) => {
+        await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: HANDOVER_REPLY }) });
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({ messageId: handover.messageId, requestId, handover: true }),
+        });
+      });
+    }
 
     const turn = await beginTurn(claims, text);
     if (turn.kind !== "ok") return beginFailure(c, turn.kind);

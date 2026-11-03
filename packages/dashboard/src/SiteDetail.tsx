@@ -1,3 +1,4 @@
+import { Fragment } from "preact";
 import { useEffect, useState } from "preact/hooks";
 import {
   api,
@@ -8,6 +9,8 @@ import {
   type LeadRow,
   type SiteState,
   type SourceRow,
+  type TranscriptRow,
+  type HandoverRow,
 } from "./api.js";
 
 interface Props {
@@ -113,6 +116,9 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [deletions, setDeletions] = useState<DeletionRow[]>([]);
   const [sources, setSources] = useState<SourceRow[]>([]);
+  const [handovers, setHandovers] = useState<HandoverRow[]>([]);
+  /** Gesprek-ids waarvan het transcript uitgeklapt is. */
+  const [openTranscripts, setOpenTranscripts] = useState<Record<string, TranscriptRow[]>>({});
   const [sourceUrl, setSourceUrl] = useState("");
   /** Id van de rij die op bevestiging wacht. Verwijderen is niet terug te draaien, dus geen eenklikactie. */
   const [pending, setPending] = useState<string | null>(null);
@@ -135,13 +141,14 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
 
   async function load() {
     try {
-      const [state, hist, leadList, convList, deletionList, sourceList] = await Promise.all([
+      const [state, hist, leadList, convList, deletionList, sourceList, handoverList] = await Promise.all([
         api.site(id),
         api.history(id),
         api.leads(id),
         api.conversations(id),
         api.deletions(id),
         api.sources(id),
+        api.handovers(id),
       ]);
       setSite(state);
       setDraft(toDraft(state));
@@ -150,6 +157,7 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
       setConversations(convList.conversations);
       setDeletions(deletionList.deletions);
       setSources(sourceList.sources);
+      setHandovers(handoverList.handovers);
     } catch (err) {
       if (!handleAuth(err)) setError(describeError(err));
     }
@@ -157,16 +165,18 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
 
   /** Na een verwijdering alleen de lijsten verversen: het formulier niet, want dat zou onopgeslagen werk wissen. */
   async function refreshLists() {
-    const [leadList, convList, deletionList, sourceList] = await Promise.all([
+    const [leadList, convList, deletionList, sourceList, handoverList] = await Promise.all([
       api.leads(id),
       api.conversations(id),
       api.deletions(id),
       api.sources(id),
+      api.handovers(id),
     ]);
     setLeads(leadList.leads);
     setConversations(convList.conversations);
     setDeletions(deletionList.deletions);
     setSources(sourceList.sources);
+    setHandovers(handoverList.handovers);
   }
 
   async function addSource(event: Event) {
@@ -277,6 +287,42 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
       if (!handleAuth(err)) setError(describeError(err));
     } finally {
       setBusy(false);
+    }
+  }
+
+  /** Een overdracht is af als een medewerker het gesprek heeft gelezen en contact (gaat) opnemen. */
+  async function completeHandover(row: HandoverRow) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      const res = await api.completeHandover(id, row.id);
+      setHandovers((rows) => rows.map((r) => (r.id === res.handover.id ? { ...r, status: res.handover.status } : r)));
+      setOk("Overdracht afgerond.");
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Transcripten worden pas opgehaald als iemand ze uitklapt; geen bulk-route die alles leest. */
+  async function toggleTranscript(row: HandoverRow) {
+    setError(null);
+    if (openTranscripts[row.conversationId]) {
+      setOpenTranscripts((s) => {
+        const copy = { ...s };
+        delete copy[row.conversationId];
+        return copy;
+      });
+      return;
+    }
+    try {
+      const t = await api.transcript(id, row.conversationId);
+      setOpenTranscripts((s) => ({ ...s, [row.conversationId]: t.messages }));
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
     }
   }
 
@@ -687,6 +733,64 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
                     )}
                   </td>
                 </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div class="section">
+        <h2>Overdrachten</h2>
+        <p class="hint">
+          Wanneer een bezoeker om een mens vroeg, staat hier het gesprek opvallend in beeld. Behandeld betekent: er is
+          contact genomen; de status is dan dicht.
+        </p>
+        {handovers.length === 0 ? (
+          <p class="empty">Nog geen overdrachtsverzoeken.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>Wanneer</th>
+                <th>Vraag</th>
+                <th>Status</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {handovers.map((row) => (
+                <Fragment key={row.id}>
+                  <tr>
+                    <td class="site-meta">{when(row.createdAt)}</td>
+                    <td class="lead-msg">{row.triggerMessage}</td>
+                    <td>
+                      <span class="pill">{row.status}</span>
+                    </td>
+                    <td class="nowrap">
+                      <button class="ghost" type="button" disabled={busy} onClick={() => toggleTranscript(row)}>
+                        {openTranscripts[row.conversationId] ? "Berichten weg" : "Berichten"}
+                      </button>
+                      {row.status === "open" && (
+                        <button class="ghost" type="button" disabled={busy} onClick={() => completeHandover(row)}>
+                          Behandeld
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                  {openTranscripts[row.conversationId] && (
+                    <tr>
+                      <td colSpan={4} style="padding-top:0">
+                        {openTranscripts[row.conversationId]!.map((m, i) => (
+                          <p key={i} class="lead-msg">
+                            <strong>{m.role === "user" ? "Bezoeker" : "Assistent"}</strong> · <span class="site-meta">{when(m.createdAt)}</span>
+                            <br />
+                            {m.content}
+                          </p>
+                        ))}
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
               ))}
             </tbody>
           </table>
