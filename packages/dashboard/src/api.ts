@@ -88,6 +88,17 @@ export interface DeletionRow {
   actorId: string;
 }
 
+export interface SourceRow {
+  id: string;
+  url: string;
+  title: string | null;
+  status: "pending" | "ok" | "failed";
+  errorCode: string | null;
+  contentLength: number;
+  chunkCount: number;
+  fetchedAt: string;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -158,6 +169,19 @@ export const api = {
     ),
   deletions: (id: string, limit = 50) =>
     request<{ deletions: DeletionRow[] }>(`/api/v1/admin/sites/${id}/deletions?limit=${limit}`),
+  sources: (id: string) => request<{ sources: SourceRow[]; maxSources: number }>(`/api/v1/admin/sites/${id}/sources`),
+  addSource: (id: string, url: string) =>
+    request<{ source: SourceRow }>(`/api/v1/admin/sites/${id}/sources`, { method: "POST", body: { url } }).then(
+      (r) => r.source,
+    ),
+  reindexSource: (id: string, sourceId: string) =>
+    request<{ source: SourceRow }>(`/api/v1/admin/sites/${id}/sources/${sourceId}/reindex`, { method: "POST" }).then(
+      (r) => r.source,
+    ),
+  deleteSource: (id: string, sourceId: string) =>
+    request<{ deleted: { pages: number; chunks: number } }>(`/api/v1/admin/sites/${id}/sources/${sourceId}`, {
+      method: "DELETE",
+    }),
 };
 
 /** Nederlandse tekst voor de fouten die de API echt teruggeeft. */
@@ -168,6 +192,12 @@ export function describeError(err: unknown): string {
         return "Niet ingelogd of de sessie is verlopen.";
       case "invalid_input":
         return "De invoer klopt niet. Controleer de velden.";
+      case "invalid_url":
+        return "Alleen publieke http(s)-pagina's; localhost en privénetwerken zijn geen bron.";
+      case "duplicate":
+        return "Deze URL is al een bron.";
+      case "limit":
+        return "Het maximum aantal bronnen voor deze site is bereikt.";
       case "model_locked":
         return "Het model komt nu uit MISTRAL_MODEL in de omgeving en kan hier niet gewijzigd worden.";
       case "rate_limited":

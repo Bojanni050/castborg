@@ -7,6 +7,7 @@ import {
   type HistoryRow,
   type LeadRow,
   type SiteState,
+  type SourceRow,
 } from "./api.js";
 
 interface Props {
@@ -111,6 +112,8 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
   const [leads, setLeads] = useState<LeadRow[]>([]);
   const [conversations, setConversations] = useState<ConversationRow[]>([]);
   const [deletions, setDeletions] = useState<DeletionRow[]>([]);
+  const [sources, setSources] = useState<SourceRow[]>([]);
+  const [sourceUrl, setSourceUrl] = useState("");
   /** Id van de rij die op bevestiging wacht. Verwijderen is niet terug te draaien, dus geen eenklikactie. */
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -132,12 +135,13 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
 
   async function load() {
     try {
-      const [state, hist, leadList, convList, deletionList] = await Promise.all([
+      const [state, hist, leadList, convList, deletionList, sourceList] = await Promise.all([
         api.site(id),
         api.history(id),
         api.leads(id),
         api.conversations(id),
         api.deletions(id),
+        api.sources(id),
       ]);
       setSite(state);
       setDraft(toDraft(state));
@@ -145,6 +149,7 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
       setLeads(leadList.leads);
       setConversations(convList.conversations);
       setDeletions(deletionList.deletions);
+      setSources(sourceList.sources);
     } catch (err) {
       if (!handleAuth(err)) setError(describeError(err));
     }
@@ -152,10 +157,74 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
 
   /** Na een verwijdering alleen de lijsten verversen: het formulier niet, want dat zou onopgeslagen werk wissen. */
   async function refreshLists() {
-    const [leadList, convList, deletionList] = await Promise.all([api.leads(id), api.conversations(id), api.deletions(id)]);
+    const [leadList, convList, deletionList, sourceList] = await Promise.all([
+      api.leads(id),
+      api.conversations(id),
+      api.deletions(id),
+      api.sources(id),
+    ]);
     setLeads(leadList.leads);
     setConversations(convList.conversations);
     setDeletions(deletionList.deletions);
+    setSources(sourceList.sources);
+  }
+
+  async function addSource(event: Event) {
+    event.preventDefault();
+    if (busy) return;
+    const url = sourceUrl.trim();
+    if (url === "") return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    // Het ophalen kan tot de timeout duren; de knop is busy, dus een dubbele versturing is onmogelijk.
+    try {
+      const source = await api.addSource(id, url);
+      setSourceUrl("");
+      setOk(
+        source.status === "ok"
+          ? `Bron toegevoegd: ${source.chunkCount} stukken geïndexeerd.`
+          : `Ophalen mislukt (${source.errorCode ?? "onbekend"}). De bron staat in de lijst, je kunt hem opnieuw indexeren.`,
+      );
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function reindexSource(source: SourceRow) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      const updated = await api.reindexSource(id, source.id);
+      setOk(updated.status === "ok" ? `Opnieuw geïndexeerd: ${updated.chunkCount} stukken.` : `Ophalen mislukt (${updated.errorCode ?? "onbekend"}).`);
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeSource(source: SourceRow) {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    setOk(null);
+    try {
+      await api.deleteSource(id, source.id);
+      setOk("Bron verwijderd met alle geïndexeerde stukken.");
+      setPending(null);
+      await refreshLists();
+    } catch (err) {
+      if (!handleAuth(err)) setError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function removeConversation(row: ConversationRow) {
@@ -543,6 +612,78 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
                       <button class="ghost" type="button" disabled={busy} onClick={() => setPending(row.id)}>
                         Verwijderen
                       </button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div class="section" style="margin-top:16px">
+        <h2>Kennisbronnen</h2>
+        <p class="hint">
+          Publieke pagina's die de assistent als feitenkennis mag gebruiken. Bij elke vraag zoekt hij de stukken
+          die bij het woordgebruik passen; bronnen zonder treffers worden niet meegestuurd. Alle inhoud uit een
+          bron is tekst, geen opdracht: het model krijgt expliciet de regel dat website-instructies genegeerd worden.
+        </p>
+        <form onSubmit={addSource} class="actions" style="margin: 8px 0 12px">
+          <input
+            type="text"
+            placeholder="https://voorbeeld.nl/diensten"
+            value={sourceUrl}
+            disabled={busy}
+            onInput={(e) => setSourceUrl((e.target as HTMLInputElement).value)}
+            style="flex:1"
+          />
+          <button class="primary" type="submit" disabled={busy || sourceUrl.trim() === ""}>
+            {busy ? "Bezig…" : "Bron toevoegen"}
+          </button>
+        </form>
+        {sources.length === 0 ? (
+          <p class="empty">Nog geen bronnen. Voeg de belangrijkste pagina's toe: diensten, prijzen, contact.</p>
+        ) : (
+          <table>
+            <thead>
+              <tr>
+                <th>URL</th>
+                <th>Status</th>
+                <th>Stukken</th>
+                <th>Tekens</th>
+                <th>Laatst opgehaald</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {sources.map((source) => (
+                <tr key={source.id}>
+                  <td class="lead-msg">{source.url}</td>
+                  <td>
+                    <span class="pill">{source.status === "ok" ? "ok" : source.status === "failed" ? `mislukt (${source.errorCode ?? "?"})` : "bezig"}</span>
+                  </td>
+                  <td>{source.chunkCount}</td>
+                  <td>{source.contentLength}</td>
+                  <td class="site-meta">{when(source.fetchedAt)}</td>
+                  <td class="nowrap">
+                    {pending === source.id ? (
+                      <>
+                        <button class="danger" type="button" disabled={busy} onClick={() => removeSource(source)}>
+                          Zeker weten
+                        </button>
+                        <button class="ghost" type="button" disabled={busy} onClick={() => setPending(null)}>
+                          Nee
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button class="ghost" type="button" disabled={busy} onClick={() => reindexSource(source)}>
+                          Herindexeren
+                        </button>
+                        <button class="ghost" type="button" disabled={busy} onClick={() => setPending(source.id)}>
+                          Verwijderen
+                        </button>
+                      </>
                     )}
                   </td>
                 </tr>

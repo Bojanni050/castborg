@@ -83,6 +83,10 @@ export const siteSettingsHistoryQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 
+/** Eén kennisbron toevoegen; de echte URL-regels zitten in de API (parseSourceUrl), hier alleen de vorm. */
+export const addSourceInput = z.object({ url: z.string().min(8).max(2048) }).strict();
+export type AddSourceInput = z.infer<typeof addSourceInput>;
+
 export const sendMessageInput = z.object({
   conversationId: z.string().uuid().optional(),
   text: z.string().min(1).max(2000),

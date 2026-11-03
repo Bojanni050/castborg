@@ -344,3 +344,35 @@ deze aanpak), Actions (wat is gewijzigd).
   `/widget.js` 33.706 B met `cache-control: public, max-age=300`, `/api/v1/health` 200, inloggen 200,
   `pnpm migrate` in de container geeft "Niets te doen", en in de browser op de container-origin laadt
   `/widget.js`, opent de launcher en komt er een (stub-)antwoord terug. Tests 112/112, typecheck schoon.
+## 2026-11-03 (Kennisbank + injectie-hardening)
+
+- Findings: de assistent kan alleen wat er letterlijk in de systeemprompt staat; echte productkennis
+  ontbrak. En alles wat wél via een pagina binnenkomt, is potentieel een opdracht aan het model.
+- Conclusions: retrieval met Postgres full-text (`tsvector`, GIN, lexemes van de vraag met OR samengevoegd
+  en gerankt met `ts_rank`) in plaats van embeddings: het leeft in de bestaande database, geen nieuwe
+  afhankelijkheid, en het is in het dashboard uit te leggen. Injectie wordt begrensd met markertokens
+  (`BRON-BEGIN`/`BRON-EIND`) die bij opslag én bij assemblage uit broninhoud zijn verwijderd, met
+  regels die broninhoud als data presenteren. De regels-tekst zelf noemt de tokens bewust niet, zodat
+  hun aantal in de prompt exact controleerbaar is (1 per bron, nooit een tweede keer).
+  Geleerd tijdens de bouw: `websearch_to_tsquery` is AND-semantiek en matchde een vraag van vijf
+  woorden bijna nooit; de fix was de lexemelijst met ' | ' te joinen. Verder viel een echte bug op
+  bij de testrun: `assembleSystemPrompt` was met 4 argumenten aangeroepen maar accepteerde er 3,
+  waardoor `{{siteName}}` niet meer vervangen werd en retrieval op de sitenaam zocht. De test ving
+  het, typecheck ving het pas achteraf — esbuild stript types in vitest.
+- Actions:
+  - `packages/api/migrations/0008_knowledge_base.sql`: `site_pages` (`status ok/failed`, `error_code`,
+    `raw_text`, uniek op `(site_id, url)`) en `page_chunks` (`ts` als generated column,
+    GIN-index), RLS en rechten volgens het 0001-patroon.
+  - `packages/api/src/knowledge.ts`: URL-parser (alleen publiek http/https, privé-IP's geweigerd),
+    HTML→tekst, titel-extractie, chunking (~500 tekens op zinsovergangen), `neutralizeMarkers`,
+    bronblok-assembly, `fetchAndChunk` met foutcodes voor het dashboard.
+  - `packages/api/src/app.ts`: `assembleSystemPrompt` in `beginTurn` (retrieval vóór de
+    budgetreservering, zodat de chunks in de inputschatting wegen); beheerroutes
+    `GET/POST /sources`, `POST /sources/:id/reindex`, `DELETE /sources/:id` (max 25 per site).
+  - `packages/shared/src/index.ts`: `addSourceInput`.
+  - `packages/dashboard/src/api.ts` + `SiteDetail.tsx`: sectie "Kennisbronnen" met toevoegen,
+    herindexeren en verwijderen (met het bestaande "Zeker weten"-patroon).
+  - `packages/api/test/knowledge.test.ts`: 14 tests — extractie/chunking/markers, de beheerroutes,
+    de gehele bevragingsflow met een gestubde fetch, en tenant-isolatie op de nieuwe tabellen.
+- Validatie: alle 126 tests groen (112 bestaande + 14 nieuwe), typecheck schoon in alle vier de
+  packages, tegen een lokale Postgres 18.6 op poort 5432 (`DATABASE_URL_MIGRATOR`-override).

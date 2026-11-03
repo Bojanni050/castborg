@@ -9,6 +9,7 @@ import { streamSSE } from "hono/streaming";
 import {
   conversationsQuery,
   createSiteInput,
+  addSourceInput,
   dashboardLoginInput,
   deletionsQuery,
   leadsQuery,
@@ -33,6 +34,16 @@ import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
 import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
 import { RateLimiter } from "./ratelimit.js";
+import {
+  buildSourcePromptBlock,
+  fetchAndChunk,
+  MAX_CHUNKS_PER_TURN,
+  MAX_SOURCES_PER_SITE,
+  MAX_SOURCE_CHARS_PER_TURN,
+  neutralizeMarkers,
+  parseSourceUrl,
+  type SourceRow,
+} from "./knowledge.js";
 import { deleteConversation, deleteLead, runRetention } from "./retention.js";
 import { issueSessionToken, verifySessionToken, type SessionClaims } from "./token.js";
 
@@ -260,6 +271,57 @@ export function createApp(deps: AppDeps): Hono {
   const costEur = (u: Usage) => (u.inputTokens * pricing.inputEurPerMTok + u.outputTokens * pricing.outputEurPerMTok) / 1_000_000;
 
   /**
+   * Bronchunks bij de bezoekersvraag zoeken en de systeemprompt ermee uitbreiden.
+   *
+   * De zoekvraag is bewust alleen het laatste bezoekersbericht, niet de hele geschiedenis:
+   * eenvoudiger te begrijpen en goedkoop; als de bezoeker in twee zinnen doorpraat, kan hij
+   * eventueel de term herhalen. Recaller (embeddings, samenvatting van de geschiedenis) bewust
+   * een stap later, zolang keyword-overlap de kwaliteit haalt.
+   *
+   * Geen treffers of geen bronnen: dan is de prompt exact zoals vóór de kennisbank.
+   */
+  /** Vervangt {{siteName}} en plakt de gevonden bronchunks aan de systeemprompt. */
+  async function assembleSystemPrompt(q: PoolClient, basePrompt: string, siteName: string, userText: string): Promise<string> {
+    const rows = (
+      await q.query<{ content: string; url: string }>(
+        // Array-lexemes van de vraag met ' | ' (OR) samenvoegen: een vraag met vijf woorden
+        // overlapt zelden met álles in één chunk, dus AND-semantiek (websearch_to_tsquery)
+        // zou bijna leeg terugkomen. Relevantie doen we met ts_rank.
+        `WITH q AS (
+           SELECT to_tsquery('simple',
+                  (SELECT string_agg(lex, ' | ')
+                     FROM unnest(tsvector_to_array(to_tsvector('simple', $1))) AS lex)) AS tsq
+         )
+         SELECT pc.content, sp.url
+           FROM page_chunks pc
+             JOIN site_pages sp ON sp.id = pc.page_id
+             CROSS JOIN q
+          WHERE sp.status = 'ok'
+            AND q.tsq IS NOT NULL
+            AND pc.ts @@ q.tsq
+          ORDER BY ts_rank(pc.ts, q.tsq) DESC, pc.chunk_index ASC
+          LIMIT $2`,
+        [userText, MAX_CHUNKS_PER_TURN],
+      )
+    ).rows;
+    let prompt = basePrompt.replaceAll("{{siteName}}", siteName);
+    if (rows.length === 0) return prompt;
+
+    // Rangschikking is op relevantie; tot het tekencap de beste houden. En nog eens neutraliseren:
+    // de database bevat al gewiste chunks, dit is de tweede lijn van de grens, niet de eerste.
+    const sources: { url: string; content: string }[] = [];
+    let total = 0;
+    for (const row of rows) {
+      const content = neutralizeMarkers(row.content);
+      if (total + content.length > MAX_SOURCE_CHARS_PER_TURN) break;
+      sources.push({ url: row.url, content });
+      total += content.length;
+    }
+    if (sources.length === 0) return prompt;
+    return prompt + buildSourcePromptBlock(sources);
+  }
+
+  /**
    * Transactie 1 van een beurt: valideren, budget en limiet controleren, gebruikersbericht opslaan, context ophalen.
    * De AI-aanroep valt hier bewust buiten, zodat er geen databaseverbinding vastzit tijdens de latency van de provider.
    *
@@ -300,7 +362,7 @@ export function createApp(deps: AppDeps): Hono {
         )
       ).rows;
 
-      const systemPrompt = settings.system_prompt.replaceAll("{{siteName}}", settings.site_name);
+      const systemPrompt = (await assembleSystemPrompt(q, settings.system_prompt, settings.site_name, text));
       const inputText = [systemPrompt, ...existing.map((t) => t.content), text].join("\n");
       const reservedEur =
         (estimateInputTokens(inputText) * pricing.inputEurPerMTok + maxOutputTokens * pricing.outputEurPerMTok) / 1_000_000;
@@ -779,6 +841,217 @@ export function createApp(deps: AppDeps): Hono {
     if (!parsed.success) return c.json({ error: "invalid_history" }, 500);
 
     return respondToUpdate(c, await applySiteUpdate(db, siteId, parsed.data, actor));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Beheer: kennisbronnen van een site. De assistent mag alleen doen wat er echt staat.
+  //
+  // Het ophalen van de pagina gebeurt vóór de transactie: een netwerkgesprek mag nooit een
+  // databaseverbinding vasthouden (zelfde redenering als de AI-aanroep). Het wegschrijven
+  // van bron en chunks is één transactie: een halve bron bestaat niet.
+  // ---------------------------------------------------------------------------
+
+  interface SourceRowDb {
+    id: string;
+    url: string;
+    title: string | null;
+    status: "pending" | "ok" | "failed";
+    error_code: string | null;
+    content_length: number;
+    chunk_count: number;
+    fetched_at: Date;
+  }
+
+  const mapSourceRow = (r: SourceRowDb): SourceRow => ({
+    id: r.id,
+    url: r.url,
+    title: r.title,
+    status: r.status,
+    errorCode: r.error_code,
+    contentLength: r.content_length,
+    chunkCount: r.chunk_count,
+    fetchedAt: r.fetched_at.toISOString(),
+  });
+
+  const SOURCE_LIST_SQL = `
+    SELECT sp.id, sp.url, sp.title, sp.status, sp.error_code, sp.content_length, sp.fetched_at,
+           (SELECT count(*)::int FROM page_chunks pc WHERE pc.page_id = sp.id) AS chunk_count
+      FROM site_pages sp
+     ORDER BY sp.url`;
+
+  const sourceExists = async (q: PoolClient, siteId: string, url: string) =>
+    (await q.query("SELECT 1 FROM site_pages WHERE site_id = $1 AND url = $2", [siteId, url])).rowCount === 1;
+
+  /** Ophalen gebeurt synchroon op de POST; deze route is alleen lezen. */
+  app.get("/api/v1/admin/sites/:id/sources", async (c) => {
+    if (!authenticateOperator(c)) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const sources = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return null;
+      return (await q.query<SourceRowDb>(SOURCE_LIST_SQL)).rows.map(mapSourceRow);
+    });
+    if (!sources) return c.json({ error: "not_found" }, 404);
+    return c.json({ sources, maxSources: MAX_SOURCES_PER_SITE });
+  });
+
+  app.post("/api/v1/admin/sites/:id/sources", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    if (!isUuid(siteId)) return c.json({ error: "not_found" }, 404);
+
+    const parsed = addSourceInput.safeParse(await readJson(c));
+    if (!parsed.success) return c.json({ error: "invalid_input" }, 400);
+    const parsedUrl = parseSourceUrl(parsed.data.url);
+    if (!parsedUrl) return c.json({ error: "invalid_url", message: "Alleen publieke http(s)-pagina's; geen localhost of privénetwerk." }, 400);
+    const url = parsedUrl.toString();
+
+    // Bestaat de site, is er ruimte en staat er niet al een bron op die URL? Dit éérst:
+    // twee keer een pagina ophalen is zonde, en de grens hoort per site en niet per netwerkpoging.
+    const precheck = await withTenant(db, siteId, async (q) => {
+      if ((await q.query("SELECT 1 FROM sites WHERE id = $1", [siteId])).rowCount === 0) return "not_found";
+      if (await sourceExists(q, siteId, url)) return "duplicate";
+      const sources = await q.query<SourceRowDb>(SOURCE_LIST_SQL);
+      if (sources.rows.length >= MAX_SOURCES_PER_SITE) return "limit";
+      return "ok";
+    });
+    if (precheck === "not_found") return c.json({ error: "not_found" }, 404);
+    if (precheck === "duplicate") return c.json({ error: "duplicate", message: "Deze URL is al een bron." }, 409);
+    if (precheck === "limit") return c.json({ error: "limit", message: `Maximaal ${MAX_SOURCES_PER_SITE} bronnen per site.` }, 409);
+
+    const result = await fetchAndChunk(url);
+    const id = randomUUID();
+    const outcome = (result.kind === "ok"
+      ? {
+          status: "ok" as const,
+          errorCode: null,
+          title: result.title,
+          rawText: result.text,
+          contentLength: result.text.length,
+          chunks: result.chunks,
+        }
+      : { status: "failed" as const, errorCode: result.code, title: null, rawText: "", contentLength: 0, chunks: [] });
+
+    const source = await withTenant(
+      db,
+      siteId,
+      async (q) => {
+        await q.query(
+          `INSERT INTO site_pages (id, site_id, url, title, status, error_code, content_length, raw_text)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [id, siteId, url, outcome.title, outcome.status, outcome.errorCode, outcome.contentLength, outcome.rawText],
+        );
+        for (const [i, raw] of (outcome.chunks as string[]).entries()) {
+          // Vóór het opslaan de markers onschadelijk maken; de prompt-assemblage controleert het later nog eens.
+          await q.query("INSERT INTO page_chunks (site_id, page_id, chunk_index, content) VALUES ($1, $2, $3, $4)", [
+            siteId,
+            id,
+            i,
+            neutralizeMarkers(raw),
+          ]);
+        }
+        const row = (
+          await q.query<SourceRowDb>(
+            `SELECT sp.id, sp.url, sp.title, sp.status, sp.error_code, sp.content_length, sp.fetched_at,
+                    (SELECT count(*)::int FROM page_chunks pc WHERE pc.page_id = sp.id) AS chunk_count
+               FROM site_pages sp WHERE sp.id = $1`,
+            [id],
+          )
+        ).rows[0]!;
+        return mapSourceRow(row);
+      },
+      actor,
+    );
+    return c.json({ source }, 201);
+  });
+
+  /** Opnieuw ophalen en, bij succes, de oude chunks vervangen. Bij mislukking de oude kennis laten staan. */
+  app.post("/api/v1/admin/sites/:id/sources/:sourceId/reindex", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const sourceId = c.req.param("sourceId");
+    if (!isUuid(siteId) || !isUuid(sourceId)) return c.json({ error: "not_found" }, 404);
+
+    const existing = await withTenant(db, siteId, async (q) => {
+      const row = (await q.query<{ url: string }>("SELECT url FROM site_pages WHERE id = $1", [sourceId])).rows[0];
+      return row?.url ?? null;
+    });
+    if (!existing) return c.json({ error: "not_found" }, 404);
+
+    const result = await fetchAndChunk(existing);
+    const source = await withTenant(
+      db,
+      siteId,
+      async (q) => {
+        if (result.kind === "ok") {
+          await q.query(
+            `UPDATE site_pages SET title = $2, status = 'ok', error_code = NULL, content_length = $3,
+                    raw_text = $4, fetched_at = now(), updated_at = now()
+              WHERE id = $1`,
+            [sourceId, result.title, result.text.length, result.text],
+          );
+          await q.query("DELETE FROM page_chunks WHERE page_id = $1", [sourceId]);
+          for (const [i, raw] of (result.chunks as string[]).entries()) {
+            await q.query("INSERT INTO page_chunks (site_id, page_id, chunk_index, content) VALUES ($1, $2, $3, $4)", [
+              siteId,
+              sourceId,
+              i,
+              neutralizeMarkers(raw),
+            ]);
+          }
+        } else {
+          // De oude kennis blijft bestaan tot een volgende geslaagde hertoetsing: een tijdelijke
+          // netwerkstoring mag een site niet stilletjes van zijn bronkennis beroven.
+          await q.query(
+            `UPDATE site_pages SET status = 'failed', error_code = $2, content_length = 0,
+                    fetched_at = now(), updated_at = now()
+              WHERE id = $1`,
+            [sourceId, result.code],
+          );
+        }
+        const row = (
+          await q.query<SourceRowDb>(
+            `SELECT sp.id, sp.url, sp.title, sp.status, sp.error_code, sp.content_length, sp.fetched_at,
+                    (SELECT count(*)::int FROM page_chunks pc WHERE pc.page_id = sp.id) AS chunk_count
+               FROM site_pages sp WHERE sp.id = $1`,
+            [sourceId],
+          )
+        ).rows[0]!;
+        return mapSourceRow(row);
+      },
+      actor,
+    );
+    return c.json({ source });
+  });
+
+  app.delete("/api/v1/admin/sites/:id/sources/:sourceId", async (c) => {
+    const actor = authenticateOperator(c);
+    if (!actor) return c.json({ error: "unauthorized" }, 401);
+
+    const siteId = c.req.param("id");
+    const sourceId = c.req.param("sourceId");
+    if (!isUuid(siteId) || !isUuid(sourceId)) return c.json({ error: "not_found" }, 404);
+
+    const deleted = await withTenant(
+      db,
+      siteId,
+      async (q) => {
+        const page = (await q.query<{ id: string }>("SELECT id FROM site_pages WHERE id = $1", [sourceId])).rows[0];
+        if (!page) return null;
+        const chunks = (await q.query<{ n: number }>("SELECT count(*)::int AS n FROM page_chunks WHERE page_id = $1", [sourceId])).rows[0]!.n;
+        await q.query("DELETE FROM site_pages WHERE id = $1", [sourceId]); // chunks gaan mee (ON DELETE CASCADE)
+        return { pages: 1, chunks };
+      },
+      actor,
+    );
+    if (!deleted) return c.json({ error: "not_found" }, 404);
+    return c.json({ deleted });
   });
 
   // ---------------------------------------------------------------------------

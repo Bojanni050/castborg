@@ -230,6 +230,24 @@ komt, bijvoorbeeld een CDN.
 - Meerdere beheerders zonder dashboard-auth: zet `ADMIN_TOKENS="naam:token,naam2:token2"` in plaats van `ADMIN_TOKEN`.
   De naam komt in de historie terecht. Dit is een benoemde sleutel, geen authenticatie: iedereen met een token is die naam.
 
+## Kennisbronnen
+
+- Per site zijn er bronnen: URL's van pagina's die de API zelf ophaalt, tot tekst inkort, in chunks van ~500
+  tekens verdeelt en opslaat in `site_pages` + `page_chunks` (migratie 0008, RLS via het normale tenantpatroon).
+  Er zijn maximaal 25 bronnen per site.
+- Bij elke beurt zoekt de API in de chunks naar woorden uit de bezoekersvraag (full-text met `to_tsvector('simple')`,
+  met OR-lexemes zodat de vraag niet álle woorden hoeft te bevatten) en zet de best passende chunks, gerangschikt met
+  `ts_rank`, tot maximaal 3000 tekens per beurt in de systeemprompt, tussen de markers `BRON-BEGIN`/`BRON-EIND` met
+  per blok de bron-URL. Geen treffers, geen bronblok: de systeemprompt werkt dan zoals voorheen.
+- Injectiebegrenzing: pagina-inhoud wordt bij opslag onschadelijk gemaakt (`neutralizeMarkers`) en de
+  promptassemblage neutraliseert nog eens, zodat een gepubliceerde pagina de bronblokken niet zelf kan
+  overschrijven; de regels in het bronblok zeggen expliciet dat de inhoud data is, geen instructie.
+- Foute ophalingen (`fetch_failed`, `unsupported_type`, `too_large`, `no_text`, `invalid_url`) landen als
+  `status='failed'` met foutcode in het dashboard; een pagina met bijna geen leesbare tekst (<40 tekens) telt
+  als `no_text`. Herindexeren behoudt de oude chunks tot de nieuwe ophaling slaagt.
+- Alleen pagina's met `status='ok'` nemen deel aan de retrieval, dus een mislukte herindexering zet de oude kennis
+  bewust niet uit.
+
 ## Dashboard
 
 `/` serveert het dashboard als `packages/dashboard/dist` bestaat (`corepack pnpm --filter @ai-lead/dashboard build`).
