@@ -14,12 +14,16 @@ export type LeadStatus = z.infer<typeof leadStatus>;
 /** Publieke widget-sleutel: identificeert een site, geeft GEEN toegang tot privégegevens. */
 export const publicSiteKey = z.string().regex(/^pk_[a-z0-9]{24}$/);
 
+/** Widget-teksten en uitwijktaal; alleen twee talen, want meer vertalingen zijn er nog niet. */
+const languageSchema = z.enum(["nl", "en"]);
+
 export const widgetConfigResponse = z.object({
   siteKey: publicSiteKey,
   greeting: z.string().max(500),
   openingQuestion: z.string().max(300).nullable(),
   position: z.enum(["bottom-right", "bottom-left"]),
   primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  language: languageSchema,
 });
 export type WidgetConfigResponse = z.infer<typeof widgetConfigResponse>;
 
@@ -44,6 +48,7 @@ export const createSiteInput = z.object({
   openingQuestion: openingQuestionSchema.optional(),
   widgetPosition: widgetPositionSchema.optional(),
   primaryColor: primaryColorSchema.optional(),
+  language: languageSchema.optional(),
   model: modelSchema.optional(),
   dailyBudgetEur: dailyBudgetSchema.optional(),
   maxMessagesPerConversation: maxMessagesSchema.optional(),
@@ -67,6 +72,7 @@ export const updateSiteSettingsInput = z
     openingQuestion: openingQuestionSchema,
     widgetPosition: widgetPositionSchema,
     primaryColor: primaryColorSchema,
+    language: languageSchema,
     model: modelSchema,
     dailyBudgetEur: dailyBudgetSchema,
     maxMessagesPerConversation: maxMessagesSchema,

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { createApp } from "../src/app.js";
 import { HANDOVER_RULE } from "../src/handover.js";
+import { languageRule } from "../src/language.js";
 import { createPool, withTenant, type Db } from "../src/db/tenant.js";
 import { RateLimiter } from "../src/ratelimit.js";
 import { StubProvider, type ProviderRequest, type ProviderResponse } from "../src/provider.js";
@@ -151,7 +152,9 @@ describe("instellingen wijzigen", () => {
     const c = await startConversation(app, site.publicKey);
     expect((await sendMessage(app, c.conversationId, c.token)).status).toBe(200);
     // De overdrachtsregel zit bewust achter ELKE systeemprompt.
-    expect(provider.lastPrompt).toBe("Je bent de assistent van Prompts. Antwoord kort." + HANDOVER_RULE);
+    expect(provider.lastPrompt).toBe(
+      "Je bent de assistent van Prompts. Antwoord kort." + HANDOVER_RULE + languageRule("nl"),
+    );
   });
 
   it("een nieuwe site heeft meteen een bruikbare prompt", async () => {
@@ -303,7 +306,9 @@ describe("dagbudget als harde grens", () => {
   it("twee gelijktijdige beurten met budget voor één: één antwoord, één 503", async () => {
     const app = makeApp({ pricing, maxOutputTokens: 4 });
     const site = await createSite(app, "Race");
-    await req(app, `/api/v1/admin/sites/${site.id}`, { method: "PATCH", body: { systemPrompt: "a", dailyBudgetEur: 0.12 } });
+    // Na de taalregel is een reservering ~0,13 (systeemprompt + overdracht- en taalregel +
+    // 4 uitgavetokens): 0,15 laat de eerste beurt door, de concurrentie gaat er boven.
+    await req(app, `/api/v1/admin/sites/${site.id}`, { method: "PATCH", body: { systemPrompt: "a", dailyBudgetEur: 0.15 } });
     const c = await startConversation(app, site.publicKey);
 
     // De provider blijft 150 ms hangen, zodat de reservering van de eerste beurt nog leeft

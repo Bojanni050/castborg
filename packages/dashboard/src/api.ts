@@ -21,6 +21,7 @@ export interface SiteSettings {
   dailyBudgetEur: number;
   maxMessagesPerConversation: number;
   timezone: string;
+  language: string;
   conversationRetentionDays: number;
   leadRetentionDays: number;
   updatedAt: string;

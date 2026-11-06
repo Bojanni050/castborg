@@ -266,6 +266,20 @@ komt, bijvoorbeeld een CDN.
   (om de letterlijke lijst heen, of in een andere taal), dan verwijst de gewone assistent naar het contactformulier
   in plaats van het zelf te "regelen".
 
+## Talen
+
+- Elke site heeft een instelling **Taal** (`nl` of `en`, migratie 0010, standaard `nl`), te kiezen in het dashboard
+  bij de widget-instellingen en meegegeven bij het aanmaken van een site. De waarde bepaalt twee dingen:
+  1. **De widget-teksten**: knoppen, placeholders, foutmeldingen en aria-labels komen uit een woordenboek in het
+     widget (`src/i18n.ts`); Engelstalige sites krijgen de complete set in het Engels. De begroeting en openingsvraag
+     blijven de tekst van de sitehouder zelf.
+  2. **De uitwijktaal van de assistent**: in ELKE systeemprompt zit via `src/language.ts` de regel dat het antwoord
+     volgt op de taal waarmee de bezoeker schrijft en dat bij onduidelijkheid in de ingestelde taal geantwoord wordt.
+- De **overdrachtstekst** volgt de geschreven taal: "Kan ik met een mens praten?" geeft Nederlands terug,
+  "Can I talk to a human?" de Engelse variant. De detectie is dezelfde goedkope stopwoorden-telling, geen model.
+- De **widgetconfiguratie** geeft `language` mee via het config-eindpunt, dus de taal van het widget verschilt per
+  site zonder code-aanpassing. Meer dan twee talen is bewust uitgesteld, totdat er een klant is die erom vraagt.
+
 ## Dashboard
 
 `/` serveert het dashboard als `packages/dashboard/dist` bestaat (`corepack pnpm --filter @ai-lead/dashboard build`).

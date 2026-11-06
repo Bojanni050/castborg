@@ -31,7 +31,8 @@ import {
   DASHBOARD_COOKIE,
   type DashboardAuthConfig,
 } from "./dashboard-auth.js";
-import { HANDOVER_REPLY, HANDOVER_RULE, isHandoverRequest } from "./handover.js";
+import { HANDOVER_RULE, handoverReply, isHandoverRequest } from "./handover.js";
+import { languageRule, type SiteLanguage } from "./language.js";
 import { notifyLead, type LeadWebhookConfig } from "./lead-webhook.js";
 import { logEvent, logProviderError } from "./log.js";
 import { estimateInputTokens, estimateUsage, type AiProvider, type ChatTurn, type ProviderRequest, type Usage } from "./provider.js";
@@ -224,6 +225,7 @@ interface TurnSettings {
   max_messages_per_conversation: number;
   daily_budget_eur: string;
   timezone: string;
+  language: string;
 }
 
 type BeginResult =
@@ -255,6 +257,8 @@ const SETTINGS_COLUMNS = {
   dailyBudgetEur: "daily_budget_eur",
   maxMessagesPerConversation: "max_messages_per_conversation",
   timezone: "timezone",
+  /** Taal van de widget-teksten én de uitwijktaal van de assistent; alleen "nl" en "en". */
+  language: "language",
   conversationRetentionDays: "conversation_retention_days",
   leadRetentionDays: "lead_retention_days",
 } as const;
@@ -294,8 +298,14 @@ export function createApp(deps: AppDeps): Hono {
    *
    * Geen treffers of geen bronnen: dan is de prompt exact zoals vóór de kennisbank.
    */
-  /** Vervangt {{siteName}} en plakt de gevonden bronchunks aan de systeemprompt. */
-  async function assembleSystemPrompt(q: PoolClient, basePrompt: string, siteName: string, userText: string): Promise<string> {
+  /** Vervangt {{siteName}}, plakt de regels (overdracht, taal) en de gevonden bronchunks aan de systeemprompt. */
+  async function assembleSystemPrompt(
+    q: PoolClient,
+    basePrompt: string,
+    siteName: string,
+    userText: string,
+    language: string,
+  ): Promise<string> {
     const rows = (
       await q.query<{ content: string; url: string }>(
         // Array-lexemes van de vraag met ' | ' (OR) samenvoegen: een vraag met vijf woorden
@@ -318,7 +328,8 @@ export function createApp(deps: AppDeps): Hono {
         [userText, MAX_CHUNKS_PER_TURN],
       )
     ).rows;
-    let prompt = basePrompt.replaceAll("{{siteName}}", siteName) + HANDOVER_RULE;
+    const lang: SiteLanguage = language === "en" ? "en" : "nl";
+    let prompt = basePrompt.replaceAll("{{siteName}}", siteName) + HANDOVER_RULE + languageRule(lang);
     if (rows.length === 0) return prompt;
 
     // Rangschikking is op relevantie; tot het tekencap de beste houden. En nog eens neutraliseren:
@@ -356,7 +367,7 @@ export function createApp(deps: AppDeps): Hono {
       const settings = (
         await q.query<TurnSettings>(
           `SELECT st.system_prompt, st.model, st.max_messages_per_conversation, st.daily_budget_eur,
-                  st.timezone, si.name AS site_name
+                  st.timezone, st.language, si.name AS site_name
              FROM site_settings st
              JOIN sites si ON si.id = st.site_id`,
         )
@@ -381,7 +392,7 @@ export function createApp(deps: AppDeps): Hono {
         )
       ).rows;
 
-      const systemPrompt = (await assembleSystemPrompt(q, settings.system_prompt, settings.site_name, text));
+      const systemPrompt = (await assembleSystemPrompt(q, settings.system_prompt, settings.site_name, text, settings.language));
 
       if (!reserve) {
         await q.query("INSERT INTO messages (site_id, conversation_id, role, content) VALUES ($1, $2, 'user', $3)", [
@@ -487,7 +498,7 @@ export function createApp(deps: AppDeps): Hono {
     claims: SessionClaims,
     text: string,
     requestId: string,
-  ): Promise<{ kind: "ok"; messageId: string | null; created: boolean; handoverId: string | null } | { kind: "not_found" | "limit" | "budget" }> {
+  ): Promise<{ kind: "ok"; messageId: string | null; reply: string; created: boolean; handoverId: string | null } | { kind: "not_found" | "limit" | "budget" }> {
     const turn = await beginTurn(claims, text, { reserve: false });
     // budget kan door het type mee, maar is bij reserve:false runtime onmogelijk.
     if (turn.kind !== "ok") return turn;
@@ -505,18 +516,20 @@ export function createApp(deps: AppDeps): Hono {
       return row ? { id: row.id, created: true } : { id: null, created: false };
     });
 
+    // De vaste tekst volgt de taal waarop de bezoeker schreef.
+    const reply = handoverReply(text);
     const messageId = await finishTurn({
       claims,
       req: null,
       requestId,
       reservationId: null,
-      reply: HANDOVER_REPLY,
+      reply,
       usage: { inputTokens: 0, outputTokens: 0, estimated: false },
       status: "ok",
       durationMs: 0,
       providerName: "deterministic",
     });
-    return { kind: "ok", messageId, created: handover.created, handoverId: handover.id };
+    return { kind: "ok", messageId, reply, created: handover.created, handoverId: handover.id };
   }
 
   /**
@@ -1257,6 +1270,7 @@ export function createApp(deps: AppDeps): Hono {
       openingQuestion: site.settings.opening_question,
       position: site.settings.widget_position,
       primaryColor: site.settings.primary_color,
+      language: site.settings.language === "en" ? "en" as const : "nl" as const,
     };
     return c.json(body);
   });
@@ -1301,7 +1315,7 @@ export function createApp(deps: AppDeps): Hono {
       const handover = await handoverTurn(claims, text, requestId);
       if (handover.kind !== "ok") return beginFailure(c, handover.kind);
       await notifyHandoverRequested(leadWebhook, claims, handover, text);
-      return c.json({ messageId: handover.messageId, reply: HANDOVER_REPLY, requestId, handover: true });
+      return c.json({ messageId: handover.messageId, reply: handover.reply, requestId, handover: true });
     }
 
     const turn = await beginTurn(claims, text);
@@ -1364,7 +1378,7 @@ export function createApp(deps: AppDeps): Hono {
       if (handover.kind !== "ok") return beginFailure(c, handover.kind);
       await notifyHandoverRequested(leadWebhook, claims, handover, text);
       return streamSSE(c, async (stream) => {
-        await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: HANDOVER_REPLY }) });
+        await stream.writeSSE({ event: "delta", data: JSON.stringify({ text: handover.reply }) });
         await stream.writeSSE({
           event: "done",
           data: JSON.stringify({ messageId: handover.messageId, requestId, handover: true }),
@@ -1659,6 +1673,8 @@ interface SiteState {
     dailyBudgetEur: number;
     maxMessagesPerConversation: number;
     timezone: string;
+    /** "nl" | "en"; taal van de widget-teksten en uitwijktaal van de assistent. */
+    language: string;
     conversationRetentionDays: number;
     leadRetentionDays: number;
     updatedAt: string;
@@ -1681,12 +1697,13 @@ async function readSiteStateWith(q: PoolClient, siteId: string): Promise<SiteSta
       daily_budget_eur: string;
       max_messages_per_conversation: number;
       timezone: string;
+      language: string;
       conversation_retention_days: number;
       lead_retention_days: number;
       updated_at: Date;
     }>(
       `SELECT system_prompt, greeting, opening_question, widget_position, primary_color, model, provider,
-              daily_budget_eur, max_messages_per_conversation, timezone, conversation_retention_days,
+              daily_budget_eur, max_messages_per_conversation, timezone, language, conversation_retention_days,
               lead_retention_days, updated_at
          FROM site_settings WHERE site_id = $1`,
       [siteId],
@@ -1710,6 +1727,7 @@ async function readSiteStateWith(q: PoolClient, siteId: string): Promise<SiteSta
       dailyBudgetEur: Number(s.daily_budget_eur),
       maxMessagesPerConversation: s.max_messages_per_conversation,
       timezone: s.timezone,
+      language: s.language,
       conversationRetentionDays: s.conversation_retention_days,
       leadRetentionDays: s.lead_retention_days,
       updatedAt: s.updated_at.toISOString(),
@@ -1733,6 +1751,7 @@ interface SiteContext {
     opening_question: string | null;
     widget_position: "bottom-right" | "bottom-left";
     primary_color: string;
+    language: string;
   };
 }
 
@@ -1744,7 +1763,7 @@ async function loadSiteContext(db: Db, publicKey: string): Promise<SiteContext |
     const domains = (await q.query<{ domain: string }>("SELECT domain FROM site_domains")).rows.map((r) => r.domain);
     const settings = (
       await q.query<SiteContext["settings"]>(
-        "SELECT greeting, opening_question, widget_position, primary_color FROM site_settings",
+        "SELECT greeting, opening_question, widget_position, primary_color, language FROM site_settings",
       )
     ).rows[0];
     return settings ? { id, domains, settings } : null;

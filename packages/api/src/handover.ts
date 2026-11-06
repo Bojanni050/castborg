@@ -10,6 +10,8 @@
  * in het dashboard met een open status en het bericht gaat via de webhook de deur uit.
  */
 
+import { detectLanguage } from "./language.js";
+
 /**
  * Woordgrenzen en frase-matching bewust smal: een vals-positief is goedkoop, maar een gemiste
  * request kost een contactmoment. 'Persoon' staat alleen in 'echte persoon', want "per persoon"
@@ -29,6 +31,19 @@ export function isHandoverRequest(text: string): boolean {
 export const HANDOVER_REPLY =
   "Ik zet dit gesprek klaar voor een medewerker, die leest het mee. " +
   "Laat hieronder je e-mailadres of telefoonnummer achter, dan wordt er contact met je opgenomen.";
+
+/** Engelse vaste tekst; beide varianten horen bij dezelfde handeling in het dashboard. */
+export const HANDOVER_REPLY_EN =
+  "I'll mark this conversation for a member of our team, who will read it. " +
+  "Leave your email address or phone number below and we'll get back to you.";
+
+/**
+ * De taal van de vaste tekst volgt de taal waarop de bezoeker schreef: een bezoeker die
+ * "Can I talk to a human?" typt krijgt Engels terug, niemand moet dat in het model zoeken.
+ */
+export function handoverReply(text: string): string {
+  return detectLanguage(text) === "en" ? HANDOVER_REPLY_EN : HANDOVER_REPLY;
+}
 
 /**
  * Extra systeemregel (komt bij ELKE beurt in de prompt): de deterministische detectie vangt de

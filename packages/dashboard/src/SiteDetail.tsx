@@ -34,6 +34,7 @@ interface Draft {
   timezone: string;
   conversationRetentionDays: string;
   leadRetentionDays: string;
+  language: string;
 }
 
 function toDraft(site: SiteState): Draft {
@@ -51,6 +52,7 @@ function toDraft(site: SiteState): Draft {
     timezone: site.settings.timezone,
     conversationRetentionDays: String(site.settings.conversationRetentionDays),
     leadRetentionDays: String(site.settings.leadRetentionDays),
+    language: site.settings.language,
   };
 }
 
@@ -75,6 +77,7 @@ function buildPatch(draft: Draft, site: SiteState): Record<string, unknown> {
   if (openingQuestion !== s.openingQuestion) patch.openingQuestion = openingQuestion;
   if (draft.widgetPosition !== s.widgetPosition) patch.widgetPosition = draft.widgetPosition;
   if (draft.primaryColor !== s.primaryColor) patch.primaryColor = draft.primaryColor;
+  if (draft.language !== s.language) patch.language = draft.language;
   if (draft.model !== s.model) patch.model = draft.model;
 
   const budget = Number(draft.dailyBudgetEur.replace(",", "."));
@@ -103,6 +106,7 @@ const FIELD_NAMES: Record<string, string> = {
   daily_budget_eur: "dagbudget",
   max_messages_per_conversation: "berichtlimiet",
   timezone: "tijdzone",
+  language: "taal",
   conversation_retention_days: "bewaartermijn gesprekken",
   lead_retention_days: "bewaartermijn leads",
   name: "naam",
@@ -595,6 +599,17 @@ export function SiteDetail({ id, modelOverride, onBack, onSessionLost }: Props) 
               >
                 <option value="bottom-right">Rechtsonder</option>
                 <option value="bottom-left">Linksonder</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="language">Taal</label>
+              <select
+                id="language"
+                value={draft.language}
+                onChange={(e) => set("language", (e.target as HTMLSelectElement).value)}
+              >
+                <option value="nl">Nederlands</option>
+                <option value="en">Engels</option>
               </select>
             </div>
           </div>

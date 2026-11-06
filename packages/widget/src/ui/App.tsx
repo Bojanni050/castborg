@@ -15,6 +15,7 @@ import {
   type LeadFieldError,
 } from "../lead";
 import { clearState, isSessionFresh, loadState, newId, saveState, type ChatMessage } from "../session";
+import { dict, type Dict } from "../i18n";
 
 export interface AppProps {
   config: WidgetConfig;
@@ -25,6 +26,8 @@ export interface AppProps {
 
 export function App({ config, apiBase, open, onOpenChange }: AppProps) {
   const stored = useRef(loadState(config.siteKey));
+  /** Widget-teksten volgen de taal van de site; het model antwoordt in de taal van de bezoeker. */
+  const t = dict(config.language);
 
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const restored = stored.current.messages;
@@ -140,7 +143,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
       if (err instanceof ApiError && (err.code === "budget_exceeded" || err.code === "conversation_limit")) {
         setBlocked(true);
       }
-      const message = describeError(err);
+      const message = describeError(err, t);
       if (message) setNotice(message);
     } finally {
       setSending(false);
@@ -193,12 +196,12 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
         {
           id: newId(),
           role: "assistant",
-          text: "Bedankt! Ik heb je gegevens doorgegeven; er wordt contact met je opgenomen.",
+          text: t.leadThanks,
         },
       ]);
     } catch (err) {
-      const message = describeError(err);
-      setNotice(message ?? "Je gegevens konden niet worden verstuurd. Probeer het opnieuw.");
+      const message = describeError(err, t);
+      setNotice(message ?? t.leadSendFailed);
     } finally {
       setLeadSending(false);
     }
@@ -239,14 +242,14 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
   return (
     <div class={`al-root ${open ? "al-open" : "al-closed"}`}>
       {open ? (
-        <section class="al-panel" role="dialog" aria-label="Chatassistent" onKeyDown={onKeyDown}>
+        <section class="al-panel" role="dialog" aria-label={t.panelLabel} onKeyDown={onKeyDown}>
           <header class="al-head">
             <div class="al-head-text">
-              <span class="al-title">Assistent</span>
+              <span class="al-title">{t.title}</span>
               {/* Verplichte melding: de bezoeker moet weten dat hij met een AI praat. */}
-              <span class="al-subtitle">AI-assistent · antwoorden kunnen onjuist zijn</span>
+              <span class="al-subtitle">{t.subtitle}</span>
             </div>
-            <button class="al-close" type="button" aria-label="Sluiten" onClick={() => onOpenChange(false)}>
+            <button class="al-close" type="button" aria-label={t.close} onClick={() => onOpenChange(false)}>
               ×
             </button>
           </header>
@@ -256,7 +259,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
               const busy = lastIsStreaming && index === messages.length - 1;
               return (
                 <div key={message.id} class={`al-msg al-msg-${message.role}`}>
-                  {busy ? <Dots /> : message.text}
+                  {busy ? <Dots ariaLabel={t.dotsAria} /> : message.text}
                 </div>
               );
             })}
@@ -280,15 +283,13 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
                 value={honey}
                 onInput={(event) => setHoney(event.currentTarget.value)}
               />
-              <span class="al-lead-title">Contactgegevens</span>
-              <span class="al-lead-hint">
-                Laat je e-mailadres of telefoonnummer achter, dan neemt een medewerker contact op.
-              </span>
+              <span class="al-lead-title">{t.leadTitle}</span>
+              <span class="al-lead-hint">{t.leadHint}</span>
               <input
                 class="al-lead-input"
                 type="text"
-                placeholder="Naam"
-                aria-label="Naam"
+                placeholder={t.fieldName}
+                aria-label={t.fieldName}
                 maxLength={200}
                 value={lead.name}
                 onInput={(event) => setLead({ ...lead, name: event.currentTarget.value })}
@@ -297,8 +298,8 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
                 <input
                   class={`al-lead-input${invalid("email") ? " al-invalid" : ""}`}
                   type="email"
-                  placeholder="E-mailadres"
-                  aria-label="E-mailadres"
+                  placeholder={t.fieldEmail}
+                  aria-label={t.fieldEmail}
                   autoComplete="email"
                   maxLength={320}
                   value={lead.email}
@@ -307,8 +308,8 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
                 <input
                   class={`al-lead-input${invalid("phone") ? " al-invalid" : ""}`}
                   type="tel"
-                  placeholder="Telefoonnummer"
-                  aria-label="Telefoonnummer"
+                  placeholder={t.fieldPhone}
+                  aria-label={t.fieldPhone}
                   autoComplete="tel"
                   maxLength={40}
                   value={lead.phone}
@@ -318,24 +319,24 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
               <textarea
                 class="al-lead-input"
                 rows={2}
-                placeholder="Waar gaat het over? (optioneel)"
-                aria-label="Waar gaat het over"
+                placeholder={t.fieldAbout}
+                aria-label={t.fieldAboutAria}
                 maxLength={4000}
                 value={lead.message}
                 onInput={(event) => setLead({ ...lead, message: event.currentTarget.value })}
               />
               {leadError ? (
                 <p class="al-lead-error" role="alert">
-                  {leadErrorText(leadError)}
+                  {leadErrorText(leadError, t)}
                 </p>
               ) : null}
               <div class="al-lead-actions">
                 <button class="al-lead-submit" type="submit" disabled={leadSending}>
-                  {leadSending ? "Versturen…" : "Versturen"}
+                  {leadSending ? t.sendBusy : t.send}
                 </button>
                 {blocked ? null : (
                   <button class="al-lead-skip" type="button" onClick={() => setLeadOpen(false)}>
-                    Later
+                    {t.leadSkip}
                   </button>
                 )}
               </div>
@@ -345,7 +346,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
           {!leadCaptured && !showLead ? (
             <p class="al-lead-invite">
               <button class="al-lead-link" type="button" onClick={() => setLeadOpen(true)}>
-                Laat je contactgegevens achter
+                {t.leadInvite}
               </button>
             </p>
           ) : null}
@@ -362,8 +363,8 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
               ref={inputRef}
               rows={1}
               maxLength={2000}
-              placeholder={blocked ? "Dit gesprek is afgelopen." : "Typ je bericht…"}
-              aria-label="Je bericht"
+              placeholder={blocked ? t.inputPlaceholderBlocked : t.inputPlaceholder}
+              aria-label={t.inputAria}
               value={input}
               disabled={sending || blocked}
               onInput={(event) => {
@@ -377,7 +378,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
             <button
               class="al-send"
               type="submit"
-              aria-label="Verstuur"
+              aria-label={t.sendAria}
               disabled={sending || blocked || input.trim() === ""}
             >
               <SendIcon />
@@ -388,7 +389,7 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
         <button
           class="al-launcher"
           type="button"
-          aria-label="Chat openen"
+          aria-label={t.launcherAria}
           aria-expanded="false"
           onClick={() => onOpenChange(true)}
         >
@@ -399,40 +400,40 @@ export function App({ config, apiBase, open, onOpenChange }: AppProps) {
   );
 }
 
-function leadErrorText(error: LeadFieldError): string {
+function leadErrorText(error: LeadFieldError, t: Dict): string {
   switch (error) {
     case "contact":
-      return "Vul een e-mailadres of telefoonnummer in.";
+      return t.leadError.contact;
     case "email":
-      return "Dit e-mailadres lijkt niet te kloppen.";
+      return t.leadError.email;
     case "phone":
-      return "Dit telefoonnummer lijkt niet te kloppen.";
+      return t.leadError.phone;
   }
 }
 
-function describeError(err: unknown): string | null {
+function describeError(err: unknown, t: Dict): string | null {
   if (err instanceof DOMException && err.name === "AbortError") return null;
-  if (!(err instanceof ApiError)) return "Er ging iets mis. Probeer het opnieuw.";
+  if (!(err instanceof ApiError)) return t.errorGeneric;
 
   switch (err.code) {
     case "budget_exceeded":
-      return "De assistent is vandaag niet meer beschikbaar.";
+      return t.errorBudget;
     case "conversation_limit":
-      return "Dit gesprek is afgelopen. Laat je gegevens achter, dan nemen we contact op.";
+      return t.errorLimit;
     case "rate_limited":
-      return "Het gaat te snel. Wacht even en probeer opnieuw.";
+      return t.errorRate;
     case "origin_not_allowed":
-      return "Deze site is niet gemachtigd voor de assistent.";
+      return t.errorOrigin;
     case "not_found":
-      return "De assistent is niet meer bereikbaar.";
+      return t.errorNotFound;
     default:
-      return "Er ging iets mis bij het ophalen van een antwoord.";
+      return t.errorDefault;
   }
 }
 
-function Dots() {
+function Dots({ ariaLabel }: { ariaLabel: string }) {
   return (
-    <span class="al-dots" aria-label="De assistent typt">
+    <span class="al-dots" aria-label={ariaLabel}>
       <span />
       <span />
       <span />

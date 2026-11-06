@@ -418,3 +418,35 @@ deze aanpak), Actions (wat is gewijzigd).
     systeemprompt.
 - Validatie: 136/136 tests groen (126 bestaande + 10 nieuwe), typecheck schoon in alle vier de
   packages, tegen de lokale Postgres 18.6 op poort 5432.
+
+## 2026-11-06 (Talen NL/EN)
+
+- Findings: de fase-2-slice meertaligheid. Het widget praatte vaste Nederlands, het model antwoordde
+  in geen enkele regeltaal en de overdrachtstekst kende alleen Nederlands. Een Engelstalige site kan
+  nu via een instelling in plaats van via code.
+- Conclusions: minimaliteit — precies twee talen (`nl`, `en`), geen vertaalframework en geen taal-
+  detectiemodel. De widget-teksten komen uit een simpel woordenboek; de antwoordtaal volgt de
+  bezoeker via een systeemregel en de uitwijktaal is de site-instelling; de taal van een bericht
+  raden we met stopwoorden, goedkoop en deterministisch.
+- Actions:
+  - `packages/api/migrations/0010_taal.sql`: `site_settings.language` (CHECK nl/en, default nl).
+  - `packages/api/src/language.ts` (nieuw): `languageRule(lang)` zit via `assembleSystemPrompt` in
+    ELKE systeemprompt; `detectLanguage(text)` op stopwoorden voor de uitwijk en de overdrachtstekst.
+  - `packages/api/src/handover.ts`: `HANDOVER_REPLY_EN` + `handoverReply(text)` — taal van de vaste
+    overdrachtstekst volgt de schrijftaal van de bezoeker.
+  - `packages/api/src/app.ts`: language door de hele settings-ronde (SELECT, SETTINGS_COLUMNS,
+    SiteState/SiteContext, widget-config), handover-beurt keert de berekende taal terug, in plaats
+    van een vaste tekst.
+  - `packages/shared/src/index.ts`: `languageSchema` in `createSiteInput`, `updateSiteSettingsInput`
+    en `widgetConfigResponse`.
+  - `packages/widget/src/i18n.ts` (nieuw) + `ui/App.tsx`: alle vaste teksten (titel, leadformulier,
+    composer, foutmeldingen, aria-labels) uit een `Dict`-woordenboek, gekozen met de site-instelling.
+  - `packages/dashboard/src/SiteDetail.tsx`: Taal-select (Nederlands/Engels) in de
+    widget-instellingen; alleen een gewijzigde waarde gaat mee in de patch (historie exacter).
+  - `packages/api/test/language.test.ts` (nieuw, 7 tests) + budgetdrempels in `settings.test.ts` en
+    `stream.test.ts` verhoogd: de taalregel maakte de systeemprompt (en dus de reservering) ~0,04
+    euro groter; de drempels in de begrenzingstests volgen.
+  - `README.md` + dit bestand. Validatie: 143/143 tests groen (11 bestanden), typecheck schoon in
+    alle vier de packages. LET OP: testdatabase opnieuw ingericht — Postgres is lokaal
+    geïnstalleerd met wachtwoord `postgres` (was `postgresql`) en database `ailead` is opnieuw
+    aangemaakt; tests draaien met `DATABASE_URL_MIGRATOR=postgres://postgres:postgres@127.0.0.1:5432/ailead`.
